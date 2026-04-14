@@ -1,92 +1,106 @@
-"""Script de construction du fichier d'installation (.msi) du compilateur Cx.
-
-Ce script utilise `cx_Freeze` pour transformer le code Python en
-exécutable natif (cx.exe), puis génère un installeur Windows (.msi).
-
-Prérequis :
-    pip install cx_Freeze pillow
-
-Utilisation :
-    python scripts/build_msi.py bdist_msi
-"""
+"""Générateur d'installation ultra-simple et robuste pour Cx Compiler."""
 
 import sys
 import os
+import shutil
 from pathlib import Path
+from cx_Freeze import setup, Executable
 
-# On va essayer de convertir le logo .png en .ico (si Pillow est installé)
-# afin d'avoir une belle icône pour notre exécutable et l'installeur.
-try:
-    from PIL import Image
-    def prepare_assets():
-        root = Path(__file__).resolve().parent.parent
-        png_path = root / "assets" / "logo.cx.png"
-        ico_path = root / "assets" / "logo.ico"
-        if png_path.exists() and not ico_path.exists():
-            img = Image.open(png_path)
-            img.save(ico_path, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (32, 32)])
-            print(f"[+] Icône générée: {ico_path}")
-        return str(ico_path) if ico_path.exists() else None
-except ImportError:
-    def prepare_assets():
-        print("[-] Pillow n'est pas installé, le logo PNG ne sera pas converti en ICO.")
-        return None
+# ---------------------------------------------------------------------------
+# Nettoyage optionnel
+# ---------------------------------------------------------------------------
+if "--clean" in sys.argv:
+    sys.argv.remove("--clean")
+    for d in ["build", "dist"]:
+        if os.path.exists(d):
+            shutil.rmtree(d)
+            print(f"[+] Dossier {d} nettoyé.")
 
-try:
-    from cx_Freeze import setup, Executable
-except ImportError:
-    print("Erreur: cx_Freeze n'est pas installé.")
-    print("Installez-le avec : pip install cx_Freeze")
-    sys.exit(1)
+# ---------------------------------------------------------------------------
+# Récupération de la version
+# ---------------------------------------------------------------------------
+# On lit __version__.py dynamiquement sans importer tout le package
+version_dict = {}
+with open("cx/__version__.py", "r", encoding="utf-8") as f:
+    exec(f.read(), version_dict)
+version = version_dict["__version__"]
+print(f"[+] Construction du compilateur Cx v{version}")
 
+# ---------------------------------------------------------------------------
+# Gestion de l'icône
+# ---------------------------------------------------------------------------
+icon_path = None
+if os.path.exists("assets/logo.ico"):
+    icon_path = "assets/logo.ico"
+elif os.path.exists("assets/logo.cx.png"):
+    try:
+        from PIL import Image
+        img = Image.open("assets/logo.cx.png")
+        img.save("assets/logo.ico", format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (32, 32)])
+        icon_path = "assets/logo.ico"
+        print("[+] Icône logo.ico générée avec succès.")
+    except ImportError:
+        print("[-] Pillow non installé, l'exécutable n'aura pas d'icône.")
 
-# -- Configuration des chemins ------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parent.parent
-MAIN_SCRIPT = ROOT_DIR / "cx" / "main.py"
-icon_path = prepare_assets()
+# ---------------------------------------------------------------------------
+# Paramètres d'exécutable (cx_Freeze)
+# ---------------------------------------------------------------------------
 
-# -- Options cx_Freeze -------------------------------------------------------
 build_exe_options = {
-    # On ajoute nos packages vitaux
-    "packages": ["typer", "rich", "llvmlite"],
-    "excludes": ["tkinter", "unittest"], # Allège le binaire final
-    "include_files": [],
+    # Emballe explicitement tout le package "cx", "typer" et "llvmlite"
+    "packages": ["cx", "typer", "rich", "llvmlite"],
+    
+    # Exclusions pour alléger le fichier final
+    "excludes": ["tkinter", "unittest", "email", "http", "xml", "pydoc"],
+    "zip_include_packages": ["*"],
+    "zip_exclude_packages": ["llvmlite"],
 }
 
-# Configuration spécifiques pour créer un installeur MSI
-# "ProgramFilesFolder" permet d'installer dans C:\Program Files\StilauSuite\Cx
 bdist_msi_options = {
-    "upgrade_code": "{A123B456-C789-0123-D456-E789F0123456}",  # Garder le même pour les mises à jour
-    "add_to_path": True,       # Modifie la variable PATH de Windows !
-    "initial_target_dir": r"[ProgramFilesFolder]\StilauSuite\Cx",
+    "upgrade_code": "{A123B456-C789-0123-D456-E789F0123456}",
+    "add_to_path": True,
+    # S'installera dans C:\Program Files\CxCompiler
+    "initial_target_dir": r"[ProgramFilesFolder]\CxCompiler",
+    
+    # Ces infos dictent ce qui apparaît quand on clique sur le MSI (nom du produit, etc.)
     "summary_data": {
         "author": "Stilau",
-        "comments": "The Cx Programming Language Compiler",
+        "comments": "The native compiler for the Cx Programming Language.",
         "keywords": "compiler, cx, llvm",
-    }
+    },
+    
+    # Pour s'assurer que Windows affiche bien "Cx Compiler" si possible au lieu 
+    # de chemins aléatoires dans la demande d'élévation UAC (lors de l'installation).
+    "all_users": True,
 }
 
-# Définition de l'exécutable
+# ---------------------------------------------------------------------------
+# Déclaration de l'exécutable final "cx.exe"
+# ---------------------------------------------------------------------------
 executables = [
     Executable(
-        script=str(MAIN_SCRIPT),
+        script="cx/main.py",
         target_name="cx.exe",
-        base=None,  # "Console" base (affiche le terminal), pas "Win32GUI"
-        icon=icon_path, # Utilise le joli logo
+        base=None, 
+        icon=icon_path,
         shortcut_name="Cx Compiler",
-        shortcut_dir="ProgramMenuFolder"
+        shortcut_dir="ProgramMenuFolder",
+        # Force l'exécutable cx autonome à demander l'admin si nécessaire ? (Non, pas un compilo)
+        # uac_admin=False
     )
 ]
 
-# -- Lancement du setup ------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Lancement
+# ---------------------------------------------------------------------------
 setup(
-    name="Cx Compiler",
-    version="0.1.0",
-    description="Le compilateur natif ultra-optimisé pour le langage Cx",
+    name="Cx Compiler",           # Le nom officiel qui apparaitra partout et dans l'UAC de l'installeur MSI
+    version=version,
+    description="Le compilateur haute performance natif pour le langage Cx.",
     author="Stilau",
     options={
         "build_exe": build_exe_options,
         "bdist_msi": bdist_msi_options,
     },
-    executables=executables
+    executables=executables,
 )

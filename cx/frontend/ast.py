@@ -17,13 +17,9 @@ from ..utils.source_loc import Loc, UNKNOWN_LOC
 # Base
 # ============================================================================
 
-def _loc() -> Loc:
-    return UNKNOWN_LOC
-
-
 @dataclass
 class Node:
-    loc: Loc = field(default_factory=_loc, compare=False, repr=False)
+    loc: Loc = field(compare=False, repr=False)
 
 
 # ============================================================================
@@ -102,7 +98,7 @@ class ImportDirective(Node):
 
 @dataclass
 class Item(Node):
-    is_pub: bool = False
+    is_pub: bool
 
 
 @dataclass
@@ -361,7 +357,7 @@ class WhenBlock(Stmt):
 @dataclass
 class Expr(Node):
     # Filled by the type-checker; ignored by the parser.
-    resolved_type: Any = field(default=None, compare=False, repr=False)
+    resolved_type: Any = field(default=None, init=False, compare=False, repr=False)
 
 
 # -- Literals ----------------------------------------------------------------

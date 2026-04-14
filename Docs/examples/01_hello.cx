@@ -2,7 +2,7 @@
 
 module main;
 
-@import:std/io/print();
+// @import:std/io/print();
 
 func main() -> int {
     print("Hello, World!");

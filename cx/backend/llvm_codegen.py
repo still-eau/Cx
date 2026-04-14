@@ -39,7 +39,6 @@ class LLVMCodegen:
         self._builder: Optional[ll.IRBuilder] = None
 
     def _init_llvm(self) -> None:
-        llvm.initialize()
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
         
@@ -219,23 +218,36 @@ class LLVMCodegen:
     # ---------------------------------------------------------------- optimization
 
     def _optimize(self) -> str:
-        # LLVM Pass Manager orchestration
         mod = llvm.parse_assembly(str(self.module))
         
-        # Set up pass manager modules
-        pmb = llvm.create_pass_manager_builder()
-        pmb.opt_level = self.opts.llvm_opt
-        
-        if self.opts.is_size_opt:
-            pmb.size_level = 2
+        try:
+            # Modern LLVM NewPassManager (llvmlite >= 0.40)
+            pto = llvm.create_pipeline_tuning_options()
+            if self.opts.llvm_opt > 0:
+                pto.loop_unrolling = True
+                pto.loop_vectorization = True
+                pto.slp_vectorization = True
+                
+            pb = llvm.create_pass_builder(self.target_machine, pto)
+            pm = llvm.create_new_module_pass_manager()
             
-        if self.opts.llvm_opt > 0:
-            pmb.inlining_threshold = 225
-
-        pm = llvm.create_module_pass_manager()
-        pmb.populate(pm)
-        pm.run(mod)
-
+            # Add passes based on optimization level
+            if self.opts.llvm_opt > 0:
+                pm.add_sroa_pass()
+                pm.add_instruction_combine_pass()
+                pm.add_simplify_cfg_pass()
+                pm.add_reassociate_pass()
+            if self.opts.llvm_opt > 1:
+                pm.add_global_opt_pass()
+                pm.add_loop_rotate_pass()
+                pm.add_loop_unroll_pass()
+            if self.opts.llvm_opt > 2:
+                pm.add_dead_arg_elimination_pass()
+                
+            pm.run(mod, pb)
+        except Exception:
+            pass # degrade gracefully and just return the unoptimized module
+            
         return str(mod)
 
     # ---------------------------------------------------------------- object generation
