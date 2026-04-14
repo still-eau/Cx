@@ -275,13 +275,14 @@ _ESCAPE_TABLE: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Token:
-    kind:  TK
-    value: str
-    line:  int
-    col:   int
+    kind:   TK
+    value:  str
+    line:   int
+    col:    int
+    length: int = 1
 
     def __repr__(self) -> str:
-        return f"Token({self.kind.name}, {self.value!r}, {self.line}:{self.col})"
+        return f"Token({self.kind.name}, {self.value!r}, {self.line}:{self.col}, len={self.length})"
 
 
 class LexError(Exception):
@@ -384,8 +385,10 @@ class Lexer:
 
     # -- internal: token construction ----------------------------------------
 
-    def _make(self, kind: TK, value: str, line: int, col: int) -> Token:
-        return Token(kind, value, line, col)
+    def _make(self, kind: TK, value: str, line: int, col: int, length: int = -1) -> Token:
+        if length == -1:
+            length = len(value)
+        return Token(kind, value, line, col, length)
 
     # -- internal: main dispatch ---------------------------------------------
 
@@ -478,6 +481,7 @@ class Lexer:
     # -- internal: string and char literals ----------------------------------
 
     def _lex_string(self, line: int, col: int) -> Token:
+        start_pos = self._pos
         self._advance()  # opening "
         parts: List[str] = []
         while True:
@@ -491,9 +495,10 @@ class Lexer:
                 parts.append(self._lex_escape(line, col))
             else:
                 parts.append(self._advance())
-        return self._make(TK.STRING, "".join(parts), line, col)
+        return self._make(TK.STRING, "".join(parts), line, col, self._pos - start_pos)
 
     def _lex_char(self, line: int, col: int) -> Token:
+        start_pos = self._pos
         self._advance()  # opening '
         if self._pos >= self._len:
             raise LexError("unterminated char literal", line, col)
@@ -504,7 +509,7 @@ class Lexer:
         if self._pos >= self._len or self._src[self._pos] != "'":
             raise LexError("char literal must contain exactly one character", line, col)
         self._advance()  # closing '
-        return self._make(TK.CHAR, val, line, col)
+        return self._make(TK.CHAR, val, line, col, self._pos - start_pos)
 
     def _lex_escape(self, line: int, col: int) -> str:
         self._advance()  # backslash

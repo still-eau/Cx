@@ -143,7 +143,7 @@ class Parser:
 
     def _loc(self) -> Loc:
         t = self._toks[self._pos]
-        return Loc(self._filename, t.line, t.col)
+        return Loc(self._filename, t.line, t.col, getattr(t, 'length', 1))
 
     def _peek(self, offset: int = 0) -> Token:
         i = self._pos + offset
@@ -308,10 +308,10 @@ class Parser:
             return self._parse_var_item(loc, is_pub)
         if self._check(TK.ARR):
             return self._parse_arr_item(loc, is_pub)
-        # Skip unknown token with a warning
+        # Skip unknown token with an error
         tok = self._advance()
-        self._reporter.warning(f"unexpected top-level token '{tok.value}'",
-                               Loc(self._filename, tok.line, tok.col))
+        self._reporter.error(f"unexpected top-level token '{tok.value}'",
+                                Loc(self._filename, tok.line, tok.col, getattr(tok, 'length', 1)))
         return None
 
     def _parse_brace_items(self) -> List[Item]:

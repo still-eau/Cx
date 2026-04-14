@@ -41,12 +41,12 @@ class RelocatableLinker:
         if os.name != 'nt':
             args.append("-lm")
         try:
-            res = subprocess.run(args, capture_output=True, text=True, check=True)
+            res = subprocess.run(args, capture_output=True, check=True)
             if res.stderr and self.opts.verbose:
-                self.logger.info(res.stderr)
+                self.logger.info(res.stderr.decode("utf-8", errors="replace"))
         except subprocess.CalledProcessError as e:
             self.logger.warn(f"Linker failed with code {e.returncode}")
-            err_msg = e.stderr or ""
+            err_msg = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
             
             # Gestion amicale de l'erreur classique sous Windows (LLVM standalone vs MSVC)
             if os.name == 'nt' and ("msvc-not-found" in err_msg or "program not executable" in err_msg):

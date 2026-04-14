@@ -49,7 +49,7 @@ console = Console(stderr=True)
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def _run_pipeline(opts: CompileOptions, logger: CompileLogger) -> None:
+def _run_pipeline(opts: CompileOptions, logger: CompileLogger, check_only: bool = False, ast_only: bool = False) -> None:
     # 0. Read file
     if not os.path.exists(opts.source_file):
         console.print(f"[bold red]error[/bold red]: file not found: {opts.source_file}")
@@ -71,12 +71,22 @@ def _run_pipeline(opts: CompileOptions, logger: CompileLogger) -> None:
         parser = Parser(tokens, opts.source_file, source_code, reporter=reporter)
         program = parser.parse()
         reporter.abort_if_errors()
+
+        if ast_only:
+            from rich.pretty import pprint
+            pprint(program)
+            logger.done("AST dumped.")
+            return
         
         # 3. Semantic Analysis
         logger.phase("check")
         checker = TypeChecker(reporter)
         checker.check(program)
         reporter.abort_if_errors()
+
+        if check_only:
+            logger.done("Syntax and types are correct.")
+            return
         
         # 4. AST Optimization
         logger.phase("opt")
@@ -181,6 +191,73 @@ def run(
     )
     logger = CompileLogger(verbose)
     _run_pipeline(opts, logger)
+
+
+@app.command()
+def check(
+    source_file: str = typer.Argument(..., help="Main .cx file to check (no codegen)"),
+    verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show phases info"),
+) -> None:
+    """Check a Cx source file for errors without compiling it."""
+    opts = CompileOptions(
+        source_file=source_file,
+        emit=EmitKind.IR, # dummy
+        verbose=verbose,
+    )
+    logger = CompileLogger(verbose)
+    _run_pipeline(opts, logger, check_only=True)
+
+
+@app.command()
+def ast(
+    source_file: str = typer.Argument(..., help="Main .cx file to dump AST for"),
+    verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show phases info"),
+) -> None:
+    """Parse a Cx source file and print its Abstract Syntax Tree."""
+    opts = CompileOptions(
+        source_file=source_file,
+        emit=EmitKind.IR, # dummy
+        verbose=verbose,
+    )
+    logger = CompileLogger(verbose)
+    _run_pipeline(opts, logger, ast_only=True)
+
+
+@app.command()
+def version() -> None:
+    """Print the compiler version."""
+    try:
+        from cx.__version__ import __version__
+    except ImportError:
+        __version__ = "unknown"
+    console.print(f"Cx Compiler [bold cyan]v{__version__}[/bold cyan]")
+
+
+@app.command()
+def init(
+    name: str = typer.Argument(..., help="Name of the project to initialize"),
+) -> None:
+    """Initialize a new Cx project directory with a default template."""
+    project_dir = Path(name)
+    if project_dir.exists():
+        console.print(f"[bold red]error[/bold red]: directory '{name}' already exists.")
+        sys.exit(1)
+        
+    try:
+        project_dir.mkdir()
+        src_dir = project_dir / "src"
+        src_dir.mkdir()
+        
+        main_file = src_dir / "main.cx"
+        main_file.write_text('// The entry point to your program\nfunc main() {\n    // Your code here\n}\n', encoding="utf-8")
+        
+        gitignore = project_dir / ".gitignore"
+        gitignore.write_text("/build/\n*.o\n*.exe\n*.ll\n*.s\n", encoding="utf-8")
+        
+        console.print(f"[bold green]Created[/bold green] application '{name}'")
+    except Exception as e:
+        console.print(f"[bold red]error[/bold red]: failed to create project: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -36,20 +36,6 @@ class Diagnostic:
 
     # -- rendering -----------------------------------------------------------
 
-    def _snippet(self) -> Optional[str]:
-        """Return an annotated source snippet, or None if unavailable."""
-        if not self.source or not self.loc or self.loc.line == 0:
-            return None
-        lines  = self.source.splitlines()
-        lineno = self.loc.line
-        if lineno < 1 or lineno > len(lines):
-            return None
-        raw_line  = lines[lineno - 1]
-        col       = max(1, self.loc.col)
-        underline = " " * (col - 1) + "^"
-        gutter    = f"{lineno:4} │ "
-        return f"[dim]{gutter}[/dim]{raw_line}\n[dim]{' ' * len(gutter)}{underline}[/dim]"
-
     def render(self) -> None:
         _COLORS = {
             "error":   "bold red",
@@ -58,16 +44,49 @@ class Diagnostic:
             "hint":    "bold green",
         }
         color   = _COLORS.get(self.level, "bold white")
-        loc_str = f" [dim][{self.loc}][/dim]" if self.loc and self.loc.line else ""
-        _console.print(f"[{color}]{self.level}[/{color}]{loc_str}: {self.message}")
+        
+        # 1. Message
+        _console.print(f"[{color}]{self.level}[/{color}]: [bold]{self.message}[/bold]")
 
-        snip = self._snippet()
-        if snip:
-            _console.print(snip)
+        # 2. Source code snippet (rustc-style)
+        if self.source and self.loc and getattr(self.loc, 'line', 0) > 0:
+            lines = self.source.splitlines()
+            lineno = self.loc.line
+            if 1 <= lineno <= len(lines):
+                raw_line = lines[lineno - 1]
+                # Replace tabs with spaces to preserve alignment
+                raw_line = raw_line.replace('\t', '    ') 
+                
+                col = max(1, self.loc.col)
+                length = getattr(self.loc, 'length', 1)
+                
+                # Use a minimum padding for the gutter
+                gutter = f"{lineno}"
+                padding = max(2, len(gutter))
+                
+                # Header
+                _console.print(f" {' ' * padding}[dim]╭─[[/dim]{self.loc.file}:{lineno}:{col}[dim]][/dim]")
+                _console.print(f" {' ' * padding}[dim]│[/dim]")
+                
+                # Line of code
+                _console.print(f" [bold blue]{gutter:>{padding}}[/bold blue] [dim]│[/dim] {raw_line}")
+                
+                # Underline
+                underline_pad = " " * (col - 1)
+                underline_chars = "^" * length
+                # Add the caption after the underline
+                caption_str = f" {self.message}"
+                _console.print(f" {' ' * padding}[dim]│[/dim] {underline_pad}[bold {color}]{underline_chars}{caption_str}[/bold {color}]")
+                _console.print(f" {' ' * padding}[dim]╰────[/dim]")
+        elif self.loc:
+            _console.print(f"  [dim]--> {self.loc.file}:{self.loc.line}:{self.loc.col}[/dim]")
+
+        # 3. Additional info
         if self.note:
-            _console.print(f"  [bold cyan]note[/bold cyan]: {self.note}")
+            _console.print(f"  [bold cyan]=[/bold cyan] [bold]note[/bold]: {self.note}")
         if self.hint:
-            _console.print(f"  [bold green]hint[/bold green]: {self.hint}")
+            _console.print(f"  [bold green]=[/bold green] [bold]hint[/bold]: {self.hint}")
+        _console.print("")
 
 
 # ---------------------------------------------------------------------------
