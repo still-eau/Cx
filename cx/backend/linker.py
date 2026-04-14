@@ -40,11 +40,25 @@ class RelocatableLinker:
         # Adding m for math library (used by standard double operations) on Linux/mac
         if os.name != 'nt':
             args.append("-lm")
-            
         try:
             res = subprocess.run(args, capture_output=True, text=True, check=True)
             if res.stderr and self.opts.verbose:
                 self.logger.info(res.stderr)
         except subprocess.CalledProcessError as e:
             self.logger.warn(f"Linker failed with code {e.returncode}")
-            raise CxError(f"Linking error:\n{e.stderr}")
+            err_msg = e.stderr or ""
+            
+            # Gestion amicale de l'erreur classique sous Windows (LLVM standalone vs MSVC)
+            if os.name == 'nt' and ("msvc-not-found" in err_msg or "program not executable" in err_msg):
+                raise CxError(
+                    "Impossible de lier l'exécutable sous Windows.\n\n"
+                    "Explication :\n"
+                    "Bien que Clang soit installé, LLVM sur Windows ne fournit pas la bibliothèque standard C (libc) "
+                    "ni les outils de linkage de base. Clang a besoin du SDK Windows et des librairies Microsoft.\n\n"
+                    "Solution :\n"
+                    "Installez 'Visual Studio Build Tools' (la charge de travail 'Développement Desktop en C++'),\n"
+                    "OU installez MinGW-w64 via MSYS2 et utilisez GCC.\n\n"
+                    f"Détail technique (Clang):\n{err_msg.strip()}"
+                )
+            
+            raise CxError(f"Linking error:\n{err_msg}")
