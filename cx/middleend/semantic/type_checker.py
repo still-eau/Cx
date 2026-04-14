@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing      import List, Optional, Dict, Any, Iterator
+import os
 
 from ...frontend.ast import *
 from ...utils.source_loc import Loc
@@ -89,6 +90,21 @@ class TypeChecker:
                 sym  = Symbol(name, kind, item.loc, is_pub=item.is_pub,
                               is_mut=(item.qualifier == "set"))
                 self._tbl.define(sym)
+        elif isinstance(item, ImportDirective):
+            # Verify if module exists physically (simple heuristics for now)
+            # Remove any trailing "()" from selective imports or paths
+            clean_path = item.full_path.split('{')[0].strip('/').replace('()', '')
+            
+            # Paths to check (relative current dir, or as .cx file)
+            path_file = f"{clean_path}.cx"
+            path_dir = clean_path
+            
+            if not os.path.exists(path_file) and not os.path.exists(path_dir):
+                self._rep.error(
+                    f"module '{item.full_path}' not found",
+                    item.loc,
+                    hint=f"Checked '{path_file}' and '{path_dir}'. Stdlibs might not be implemented yet."
+                )
 
     # ================================================================
     # Pass 2: item checking
@@ -313,12 +329,34 @@ class TypeChecker:
         elif isinstance(stmt, ForInfiniteStmt):
             self._check_block(stmt.body)
 
+    def _bind_pattern(self, pat: Pattern, subject_type: CxType) -> None:
+        if isinstance(pat, IdentPattern):
+            self._tbl.define(Symbol(pat.name, SymKind.VAR, pat.loc, cx_type=subject_type))
+        elif isinstance(pat, EnumPattern):
+            if isinstance(subject_type, EnumCxType):
+                variant_fields = {}
+                for v_name, v_fields in subject_type.variants:
+                    if v_name == pat.variant_name:
+                        variant_fields = {name: ty for name, ty in v_fields}
+                        break
+                for field_name in pat.fields:
+                    fy = variant_fields.get(field_name, VOID)
+                    self._tbl.define(Symbol(field_name, SymKind.VAR, pat.loc, cx_type=fy))
+            else:
+                for field_name in pat.fields:
+                    self._tbl.define(Symbol(field_name, SymKind.VAR, pat.loc, cx_type=VOID))
+        elif isinstance(pat, OrPattern):
+            if pat.alternatives:
+                self._bind_pattern(pat.alternatives[0], subject_type)
+
     def _check_match_stmt(self, stmt: MatchStmt) -> None:
-        self._check_expr(stmt.subject)
+        subj_ty = self._check_expr(stmt.subject)
         for arm in stmt.arms:
-            if arm.guard:
-                self._check_expr(arm.guard)
-            self._check_block(arm.body)
+            with self._scope():
+                self._bind_pattern(arm.pattern, subj_ty)
+                if arm.guard:
+                    self._check_expr(arm.guard)
+                self._check_block(arm.body)
 
     # ================================================================
     # Expression type inference
@@ -457,11 +495,19 @@ class TypeChecker:
             return t1
 
         if isinstance(expr, MatchExpr):
-            self._check_expr(expr.subject)
-            arm_types = [self._check_expr(a.body.stmts[-1].expr
-                          if a.body.stmts and isinstance(a.body.stmts[-1], ExprStmt)
-                          else NullLit(a.loc))
-                         for a in expr.arms]
+            subj_ty = self._check_expr(expr.subject)
+            arm_types = []
+            for a in expr.arms:
+                with self._scope():
+                    self._bind_pattern(a.pattern, subj_ty)
+                    if a.guard:
+                        self._check_expr(a.guard)
+                    self._check_block(a.body)
+                    if a.body.stmts and isinstance(a.body.stmts[-1], ExprStmt):
+                        t = a.body.stmts[-1].expr.resolved_type or VOID
+                    else:
+                        t = VOID
+                    arm_types.append(t)
             return arm_types[0] if arm_types else VOID
 
         if isinstance(expr, LambdaExpr):

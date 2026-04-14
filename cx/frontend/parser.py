@@ -222,9 +222,7 @@ class Parser:
             else:
                 path_parts.append(seg)
 
-        # trailing '()' on the last segment
-        while path_parts and path_parts[-1].endswith("()"):
-            pass  # already consumed
+        # trailing '()' on the last segment was already processed when checking TK.LPAREN
 
         full_path = "/".join(path_parts)
 
