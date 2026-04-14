@@ -91,7 +91,7 @@ class IRCall(IRInstr):
 class IRGEP(IRInstr):
     """dest = getelementptr ptr, indices…  (field/index access)."""
     ptr:     IRValue    = field(default_factory=lambda: UNDEF)
-    indices: List[int]  = field(default_factory=list)
+    indices: List[Any]  = field(default_factory=list)  # List[int | IRValue]
     elem_ty: Any        = None
 
 
@@ -165,7 +165,7 @@ class IRUnreachable(IRTerminator):
 class IRBlock:
     label:      str
     instrs:     List[IRInstr]      = field(default_factory=list)
-    terminator: IRTerminator       = field(default_factory=IRUnreachable)
+    terminator: Optional[IRTerminator] = None
 
     def emit(self, instr: IRInstr) -> None:
         self.instrs.append(instr)

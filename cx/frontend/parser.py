@@ -204,23 +204,35 @@ class Parser:
 
         # Parse path segments separated by '/'
         path_parts: List[str] = []
-        # First segment must be an identifier
-        path_parts.append(self._expect_ident("expected import path"))
-        while self._check(TK.SLASH):
-            self._advance()
-            # selective group: { a(), B }
-            if self._check(TK.LBRACE):
-                selective = self._parse_import_group()
-                full_path = "/".join(path_parts)
-                return ImportDirective(loc, full_path, None, selective)
-            seg = self._expect_ident("expected path segment")
+        
+        while True:
+            seg = ""
+            if self._match(TK.DOT_DOT):
+                seg = ".."
+            elif self._match(TK.DOT):
+                seg = "."
+            elif self._check(TK.IDENT):
+                seg = self._advance().value
+            else:
+                raise ParseError("expected path segment (ident, . or ..)", self._loc())
+                
             # suffix '()' marks a function
             if self._check(TK.LPAREN):
                 self._advance()
                 self._expect(TK.RPAREN)
-                path_parts.append(seg + "()")
+                seg += "()"
+            
+            path_parts.append(seg)
+            
+            if self._match(TK.SLASH):
+                # selective group: { a(), B }
+                if self._check(TK.LBRACE):
+                    selective = self._parse_import_group()
+                    full_path = "/".join(path_parts)
+                    return ImportDirective(loc, full_path, None, selective)
+                continue
             else:
-                path_parts.append(seg)
+                break
 
         # trailing '()' on the last segment was already processed when checking TK.LPAREN
 
@@ -458,14 +470,19 @@ class Parser:
         self._expect(TK.RBRACE)
         return ObjDecl(loc, is_pub, name, type_params, fields, methods)
 
-    def _parse_field_decl(self, is_pub: bool) -> FieldDecl:
+    def _parse_field_decl(self, is_pub: bool, expect_semi: bool = True) -> FieldDecl:
         loc       = self._loc()
         qual, ty  = self._parse_qualifier_type()
         name      = self._expect_ident("expected field name")
         default: Optional[Expr] = None
         if self._match(TK.EQ):
             default = self._parse_expr()
-        self._expect(TK.SEMICOLON)
+        
+        if expect_semi:
+            self._expect(TK.SEMICOLON)
+        else:
+            self._match(TK.SEMICOLON)
+            
         return FieldDecl(loc, qual, ty, name, default, is_pub)
 
     # ================================================================
@@ -491,7 +508,8 @@ class Parser:
         if self._check(TK.LBRACE):
             self._advance()
             while not self._check(TK.RBRACE, TK.EOF):
-                fields.append(self._parse_field_decl(False))
+                fields.append(self._parse_field_decl(False, expect_semi=False))
+                self._match(TK.COMMA, TK.SEMICOLON)   # Optional separator
             self._expect(TK.RBRACE)
         return EnumVariant(loc, vname, fields)
 
@@ -752,7 +770,11 @@ class Parser:
             self._expect(TK.SEMICOLON)
             return AssignStmt(loc, expr, op, val)
 
-        self._expect(TK.SEMICOLON)
+        # Semicolon is optional if followed by '}' (end of block)
+        if not self._match(TK.SEMICOLON):
+            if not self._check(TK.RBRACE):
+                self._expect(TK.SEMICOLON)
+
         return ExprStmt(loc, expr)
 
     # ---------------------------------------------------------------- if

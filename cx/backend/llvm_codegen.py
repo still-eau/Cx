@@ -19,104 +19,227 @@ from ..middleend.ir.nodes import (
 )
 from ..middleend.semantic.type_system import (
     CxType, PrimCxType, PtrCxType, OptCxType, ObjCxType, EnumCxType,
-    ArrCxType, FuncCxType, TupleCxType,
+    ArrCxType, FuncCxType, TupleCxType, VOID, I32, CHAR,
 )
+
+# Convenience type aliases
+_i8  = ll.IntType(8)
+_i32 = ll.IntType(32)
+_i64 = ll.IntType(64)
+_i8p = _i8.as_pointer()
+_STR_TYPE = ll.LiteralStructType([_i8p, _i64])  # fat pointer { i8*, i64 }
 
 
 class LLVMCodegen:
     def __init__(self, opts: CompileOptions, module_name: str = "cx_main"):
         self.opts = opts
         self._init_llvm()
-        
+
         self.module = ll.Module(name=module_name)
         self.module.triple = llvm.get_default_triple()
         self.module.data_layout = self.target_machine.target_data
-        
+
         # State
         self._funcs: Dict[str, ll.Function] = {}
-        self._vals: Dict[str, ll.Value] = {}
-        self._blocks: Dict[str, ll.Block] = {}
+        self._vals:  Dict[str, ll.Value]    = {}
+        self._blocks: Dict[str, ll.Block]   = {}
+        self._struct_types: Dict[str, ll.Type] = {}
         self._builder: Optional[ll.IRBuilder] = None
+
+    # ---------------------------------------------------------------- init
 
     def _init_llvm(self) -> None:
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
-        
-        # Create target machine
+
         target = llvm.Target.from_default_triple()
-        
-        # Map our opt_level to LLVM opt
         opt_map = {
-            OptLevel.O0: 0,
-            OptLevel.O1: 1,
-            OptLevel.O2: 2,
-            OptLevel.O3: 3,
+            OptLevel.O0: 0, OptLevel.O1: 1,
+            OptLevel.O2: 2, OptLevel.O3: 3,
             OptLevel.Os: 2,
         }
-        
         self.target_machine = target.create_target_machine(
             opt=opt_map[self.opts.opt_level],
             reloc='pic',
-            codemodel='default'
+            codemodel='default',
         )
 
     # ---------------------------------------------------------------- type lowering
 
     def _lower_type(self, ty: CxType) -> ll.Type:
         if isinstance(ty, PrimCxType):
-            if ty.name == "void": return ll.VoidType()
-            if ty.name == "bool": return ll.IntType(1)
-            if ty.is_integer():   return ll.IntType(ty.bits)
-            if ty.name == "flt":  return ll.FloatType()
-            if ty.name == "dbl":  return ll.DoubleType()
+            name = ty.name
+            if name == "void":   return ll.VoidType()
+            if name == "bool":   return ll.IntType(1)
+            if name == "null":   return _i8p
+            if name == "str":    return _STR_TYPE
+            if ty.is_integer():  return ll.IntType(ty.bits if ty.bits > 0 else 32)
+            if name == "flt":    return ll.FloatType()
+            if name == "dbl":    return ll.DoubleType()
+
         elif isinstance(ty, PtrCxType):
-            return self._lower_type(ty.pointee).as_pointer()
+            inner = self._lower_type(ty.pointee)
+            # FunctionType cannot be directly pointed at; wrap in a pointer type
+            if isinstance(inner, ll.FunctionType):
+                return inner.as_pointer()
+            return inner.as_pointer()
+
+        elif isinstance(ty, OptCxType):
+            # Optional<T> is represented as a nullable pointer to T.
+            # If T is already a pointer, we don't need another level of indirection.
+            inner_ll = self._lower_type(ty.inner)
+            if isinstance(inner_ll, ll.PointerType):
+                return inner_ll
+            return inner_ll.as_pointer()
+
         elif isinstance(ty, FuncCxType):
-            ret = self._lower_type(ty.ret)
+            ret  = self._lower_type(ty.ret)
             args = [self._lower_type(p) for p in ty.params]
             return ll.FunctionType(ret, args)
-            
-        return ll.IntType(32)  # Fallback
 
-    # ---------------------------------------------------------------- lowering module
+        elif isinstance(ty, ObjCxType):
+            if ty.name in self._struct_types:
+                return self._struct_types[ty.name]
+            # Create opaque named struct first to handle recursive types
+            st = self.module.context.get_identified_type(ty.name)
+            self._struct_types[ty.name] = st
+            elems = [self._lower_type(ft) for _, ft in ty.fields]
+            st.set_body(*elems)
+            return st
+
+        elif isinstance(ty, ArrCxType):
+            return ll.ArrayType(self._lower_type(ty.elem), ty.capacity)
+
+        elif isinstance(ty, TupleCxType):
+            name = f"tuple.{'_'.join(str(i) for i in range(len(ty.elems)))}"
+            if name in self._struct_types:
+                return self._struct_types[name]
+            st = self.module.context.get_identified_type(name)
+            self._struct_types[name] = st
+            st.set_body(*[self._lower_type(e) for e in ty.elems])
+            return st
+
+        elif isinstance(ty, EnumCxType):
+            if ty.name in self._struct_types:
+                return self._struct_types[ty.name]
+            st = self.module.context.get_identified_type(f"enum.{ty.name}")
+            self._struct_types[ty.name] = st
+            # Enum = { i32 tag, [32 x i8] payload }
+            st.set_body(_i32, ll.ArrayType(_i8, 32))
+            return st
+
+        return _i32  # Fallback — should not be reached in well-typed IR
+
+    # ---------------------------------------------------------------- module lowering
 
     def lower(self, hir_mod: IRModule) -> str:
-        """Lowers the entire HIR module to LLVM IR and returns the IR text."""
-        
-        # 1. Declare all functions
-        for fn in hir_mod.externs + hir_mod.functions:
-            ret_ll = self._lower_type(fn.ret_type)
-            args_ll = [self._lower_type(ty) for _, ty in fn.params]
-            fn_ty = ll.FunctionType(ret_ll, args_ll)
-            ll_fn = ll.Function(self.module, fn_ty, name=fn.name)
-            self._funcs[fn.name] = ll_fn
+        """Lower the entire HIR module to LLVM IR and return the IR text."""
 
-        # 2. Define implementations
+        # 0. Inject native runtime (Windows Win32 API)
+        self._inject_runtime()
+
+        # 1. Forward-declare all functions (externs + implementations)
+        import sys
+        sys.stderr.write(f"DEBUG: LLVMCodegen lowering {len(hir_mod.functions)} functions and {len(hir_mod.externs)} externs\n")
+        for fn in hir_mod.externs + hir_mod.functions:
+            if fn.name in self._funcs:
+                continue
+            ret_ll  = self._lower_type(fn.ret_type)
+            args_ll = [self._lower_type(ty) for _, ty in fn.params]
+            fn_ty   = ll.FunctionType(ret_ll, args_ll)
+            ll_fn   = ll.Function(self.module, fn_ty, name=fn.name)
+            self._funcs[fn.name] = ll_fn
+            sys.stderr.write(f"DEBUG: LLVMCodegen declared '{fn.name}'\n")
+
+        # 2. Emit function bodies
         for fn in hir_mod.functions:
+            sys.stderr.write(f"DEBUG: LLVMCodegen emitting body for '{fn.name}'\n")
             self._lower_function(fn)
-            
-        # 3. Verify module
+
+        # 3. Verify + stringify
         mod_ir = str(self.module)
-        llvm.parse_assembly(mod_ir) # verify and format
-        
+        llvm.parse_assembly(mod_ir)  # raises on malformed IR
+
         # 4. Optimize
         return self._optimize()
+
+    # ---------------------------------------------------------------- function lowering
+
+    def _inject_runtime(self) -> None:
+        """Inject compiler-internal runtime functions using the Win32 API."""
+        _i32 = ll.IntType(32)
+        _i64 = ll.IntType(64)
+        _ptr = ll.PointerType(ll.IntType(8))
+
+        # --- Win32 kernel32 imports ---
+        # HANDLE GetStdHandle(DWORD nStdHandle)
+        get_std_h = ll.Function(self.module, ll.FunctionType(_ptr, [_i32]), name="GetStdHandle")
+        # BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped)
+        write_file = ll.Function(self.module, ll.FunctionType(_i32, [_ptr, _ptr, _i32, _ptr, _ptr]), name="WriteFile")
+        # HANDLE GetProcessHeap()
+        get_heap = ll.Function(self.module, ll.FunctionType(_ptr, []), name="GetProcessHeap")
+        # LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
+        heap_alloc = ll.Function(self.module, ll.FunctionType(_ptr, [_ptr, _i32, _i64]), name="HeapAlloc")
+        # BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem)
+        heap_free = ll.Function(self.module, ll.FunctionType(_i32, [_ptr, _i32, _ptr]), name="HeapFree")
+
+        # --- Cx Runtime: __cx_print_str({char*, i64}) ---
+        str_struct_ty = ll.LiteralStructType([_ptr, _i64])
+        cx_print = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [str_struct_ty]), name="__cx_print_str")
+        cx_print_entry = cx_print.append_basic_block("entry")
+        builder = ll.IRBuilder(cx_print_entry)
+        
+        # Get handle
+        h_out = builder.call(get_std_h, [_i32(-11)]) # STD_OUTPUT_HANDLE
+        
+        # Extract ptr and len
+        arg_s = cx_print.args[0]
+        p_data = builder.extract_value(arg_s, 0)
+        u_len  = builder.extract_value(arg_s, 1)
+        u_len32 = builder.trunc(u_len, _i32)
+        
+        # Call WriteFile
+        written = builder.alloca(_i32)
+        builder.call(write_file, [h_out, p_data, u_len32, written, ll.Constant(_ptr, None)])
+        builder.ret_void()
+        self._funcs["__cx_print_str"] = cx_print
+
+        # --- Cx Runtime: __cx_malloc(i64) ---
+        cx_malloc = ll.Function(self.module, ll.FunctionType(_ptr, [_i64]), name="__cx_malloc")
+        cx_malloc_entry = cx_malloc.append_basic_block("entry")
+        builder = ll.IRBuilder(cx_malloc_entry)
+        h_heap = builder.call(get_heap, [])
+        # dwFlags = 0x08 (HEAP_ZERO_MEMORY)
+        res = builder.call(heap_alloc, [h_heap, _i32(8), cx_malloc.args[0]])
+        builder.ret(res)
+        self._funcs["__cx_malloc"] = cx_malloc
+
+        # --- Cx Runtime: __cx_free(ptr) ---
+        cx_free = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [_ptr]), name="__cx_free")
+        cx_free_entry = cx_free.append_basic_block("entry")
+        builder = ll.IRBuilder(cx_free_entry)
+        h_heap = builder.call(get_heap, [])
+        builder.call(heap_free, [h_heap, _i32(0), cx_free.args[0]])
+        builder.ret_void()
+        self._funcs["__cx_free"] = cx_free
 
     def _lower_function(self, fn: IRFunction) -> None:
         ll_fn = self._funcs[fn.name]
         self._vals.clear()
         self._blocks.clear()
-        
-        # Map arguments
-        for i, (p_name, _) in enumerate(fn.params):
-            ll_fn.args[i].name = p_name
-            self._vals[p_name] = ll_fn.args[i]
-            
-        # Create all blocks
+
+        # Bind argument names
+        for i, (p_name, p_type) in enumerate(fn.params):
+            arg = ll_fn.args[i]
+            arg.name = p_name
+            arg.hir_type = p_type  # Attach HIR type
+            self._vals[p_name] = arg
+
+        # Create all basic blocks up front (needed for forward branches)
         for b in fn.blocks:
             self._blocks[b.label] = ll_fn.append_basic_block(name=b.label)
-            
-        # Emit instructions
+
+        # Emit instructions block by block
         self._builder = ll.IRBuilder()
         for b in fn.blocks:
             self._builder.position_at_end(self._blocks[b.label])
@@ -124,142 +247,452 @@ class LLVMCodegen:
                 self._lower_instr(instr)
             self._lower_terminator(b.terminator)
 
-    def _lower_instr(self, instr: Any) -> None:
+    # ---------------------------------------------------------------- helpers
+
+    def _coerce_arg(self, val: ll.Value, expected: ll.Type) -> ll.Value:
+        """Best-effort coercion when an argument type doesn't match exactly."""
         assert self._builder is not None
-        
+        actual = val.type
+        if actual == expected:
+            return val
+        # Pointer ↔ pointer: bitcast
+        if isinstance(actual, ll.PointerType) and isinstance(expected, ll.PointerType):
+            return self._builder.bitcast(val, expected)
+        # Integer widening / narrowing
+        if isinstance(actual, ll.IntType) and isinstance(expected, ll.IntType):
+            if actual.width < expected.width:
+                return self._builder.zext(val, expected)
+            return self._builder.trunc(val, expected)
+        # Pointer → integer (e.g. null → i64)
+        if isinstance(actual, ll.PointerType) and isinstance(expected, ll.IntType):
+            return self._builder.ptrtoint(val, expected)
+        # Integer → pointer
+        if isinstance(actual, ll.IntType) and isinstance(expected, ll.PointerType):
+            return self._builder.inttoptr(val, expected)
+        # Float widening / narrowing
+        if isinstance(actual, ll.FloatType) and isinstance(expected, ll.DoubleType):
+            return self._builder.fpext(val, expected)
+        if isinstance(actual, ll.DoubleType) and isinstance(expected, ll.FloatType):
+            return self._builder.fptrunc(val, expected)
+        # Generic fallback: bitcast (only valid for same-size types, but better than crashing)
+        try:
+            return self._builder.bitcast(val, expected)
+        except Exception:
+            return val  # give up — let LLVM's verifier report the mismatch
+
+    def _str_global(self, value: str):
+        """Return (global, char_len) for a string literal, reusing cached globals."""
+        key = f"str_{abs(hash(value))}"
+        g = self.module.globals.get(key)
+        if g is not None:
+            # L'array type est [N x i8] ; N inclut le \0, donc char_len = N - 1
+            char_len = g.type.pointee.count - 1
+            return g, char_len                           # ← était : return g  (BUG 1)
+        try:
+            raw = value.encode('utf-8').decode('unicode_escape').encode('utf-8') + b'\0'
+        except Exception:
+            raw = value.encode('utf-8') + b'\0'
+        arr_ty = ll.ArrayType(_i8, len(raw))
+        g = ll.GlobalVariable(self.module, arr_ty, name=key)
+        g.linkage         = 'internal'
+        g.global_constant = True
+        g.initializer     = ll.Constant(arr_ty, bytearray(raw))
+        return g, len(raw) - 1
+
+    # ---------------------------------------------------------------- instruction lowering
+
+    def _lower_instr(self, instr: Any) -> None:  # noqa: C901 (complex but exhaustive)
+        assert self._builder is not None
+        b = self._builder
+
+        # ---- Memory ----
+
         if isinstance(instr, IRAlloca):
             ll_ty = self._lower_type(instr.cx_type)
-            ptr = self._builder.alloca(ll_ty, name=instr.dest)
-            self._vals[instr.dest] = ptr
-            
+            val = b.alloca(ll_ty, name=instr.dest)
+            val.hir_type = PtrCxType(instr.cx_type)
+            self._vals[instr.dest] = val
+
         elif isinstance(instr, IRStore):
             val = self._vals[instr.value.name]
             ptr = self._vals[instr.ptr.name]
-            self._builder.store(val, ptr)
-            
+
+            ptr_hir = getattr(ptr, 'hir_type', instr.ptr.type)
+            if hasattr(ptr_hir, 'pointee'):
+                target_ll_ty = self._lower_type(ptr_hir.pointee)
+            else:
+                target_ll_ty = ptr.type.pointee if hasattr(ptr.type, 'pointee') else val.type
+
+            val = self._coerce_arg(val, target_ll_ty)
+
+            expected_ptr_ty = target_ll_ty.as_pointer()
+            if ptr.type != expected_ptr_ty:
+                ptr = b.bitcast(ptr, expected_ptr_ty)
+
+            b.store(val, ptr)
+
         elif isinstance(instr, IRLoad):
             ptr = self._vals[instr.ptr.name]
-            # LLVMLite needs the pointee type for load, we usually get it from the IRType
-            # Here we hack it via load's pointer
-            val = self._builder.load(ptr, name=instr.dest)
-            self._vals[instr.dest] = val
+            # When using opaque pointers, load requires the element type
+            ptr_hir = getattr(ptr, 'hir_type', instr.ptr.type)
+            if hasattr(ptr_hir, 'pointee'):
+                etype = self._lower_type(ptr_hir.pointee)
+            else:
+                etype = ptr.type.pointee if hasattr(ptr.type, 'pointee') else _i8
             
-        elif isinstance(instr, IRBinOp):
-            lv = self._vals[instr.left.name]
-            rv = self._vals[instr.right.name]
-            
-            is_fp = False
-            is_signed = True
-            if isinstance(instr.type, PrimCxType):
-                is_fp = instr.type.is_fp
-                is_signed = instr.type.signed
-                
-            op = instr.op
-            res = None
-            if op == "+":
-                res = self._builder.fadd(lv, rv) if is_fp else self._builder.add(lv, rv)
-            elif op == "-":
-                res = self._builder.fsub(lv, rv) if is_fp else self._builder.sub(lv, rv)
-            elif op == "*":
-                res = self._builder.fmul(lv, rv) if is_fp else self._builder.mul(lv, rv)
-            elif op == "/":
-                if is_fp: res = self._builder.fdiv(lv, rv)
-                else: res = self._builder.sdiv(lv, rv) if is_signed else self._builder.udiv(lv, rv)
-            elif op == "==":
-                if is_fp: res = self._builder.fcmp_ordered("==", lv, rv)
-                else: res = self._builder.icmp_signed("==", lv, rv)
-            elif op == "!=":
-                if is_fp: res = self._builder.fcmp_unordered("!=", lv, rv)
-                else: res = self._builder.icmp_signed("!=", lv, rv)
-            elif op == "<":
-                if is_fp: res = self._builder.fcmp_ordered("<", lv, rv)
-                else: res = self._builder.icmp_signed("<", lv, rv)
-            elif op == ">":
-                if is_fp: res = self._builder.fcmp_ordered(">", lv, rv)
-                else: res = self._builder.icmp_signed(">", lv, rv)
-                
-            if res:
-                self._vals[instr.dest] = res
-                res.name = instr.dest
-                
+            if not isinstance(ptr.type, ll.PointerType):
+                raise TypeError(f"Load from non-pointer: {ptr.type}")
+
+            res = b.load(ptr, name=instr.dest) 
+            res.hir_type = ptr_hir.pointee if hasattr(ptr_hir, 'pointee') else VOID
+            self._vals[instr.dest] = res
+
+        # ---- Constants ----
+
         elif isinstance(instr, IRConst):
-            ll_ty = self._lower_type(instr.type)
-            const = ll.Constant(ll_ty, instr.value)
-            self._vals[instr.dest] = const
+            val = self._lower_const(instr)
+            val.hir_type = instr.type
+            self._vals[instr.dest] = val
+
+        # ---- Arithmetic / comparison ----
+
+        elif isinstance(instr, IRBinOp):
+            val = self._lower_binop(instr)
+            val.hir_type = instr.type
+            self._vals[instr.dest] = val
+
+        elif isinstance(instr, IRUnOp):
+            val = self._lower_unop(instr)
+            val.hir_type = instr.type
+            self._vals[instr.dest] = val
+
+        # ---- Casts ----
+
+        elif isinstance(instr, IRCast):
+            val = self._lower_cast(instr)
+            val.hir_type = instr.to_type
+            self._vals[instr.dest] = val
+
+        # ---- Pointer arithmetic ----
+
+        elif isinstance(instr, IRGEP):
+            ptr = self._vals[instr.ptr.name]
             
+            # Defensive: if we are GEPing a value instead of a pointer, spill it to a temporary
+            if not isinstance(ptr.type, ll.PointerType):
+                tmp = b.alloca(ptr.type, name=f"spill.{instr.ptr.name}")
+                # Use current hir type if possible for the alloca
+                tmp.hir_type = PtrCxType(getattr(ptr, 'hir_type', instr.ptr.type))
+                b.store(ptr, tmp)
+                ptr = tmp
+
+            indices = [
+                ll.Constant(_i32, idx) if isinstance(idx, int)
+                else self._vals[idx.name]
+                for idx in instr.indices
+            ]
+            
+            # Use HIR as the source of truth for the type being indexed
+            ptr_hir = getattr(ptr, 'hir_type', instr.ptr.type)
+            
+            if hasattr(ptr_hir, 'pointee'):
+                etype = self._lower_type(ptr_hir.pointee)
+            elif isinstance(ptr_hir, (EnumCxType, ObjCxType)):
+                etype = self._lower_type(ptr_hir)
+            else:
+                etype = ptr.type.pointee if hasattr(ptr.type, 'pointee') else _i8
+            
+            res = b.gep(ptr, indices, name=instr.dest, source_etype=etype)
+            
+            # Result of GEP is always a pointer in HIR.
+            res_hir_etype = instr.elem_ty
+            if res_hir_etype is None and hasattr(ptr_hir, 'pointee'):
+                curr = ptr_hir.pointee
+                try:
+                    it = iter(instr.indices)
+                    next(it, None) # Skip first index
+                    for idx in it:
+                        if isinstance(idx, int):
+                            if isinstance(curr, ObjCxType):
+                                if 0 <= idx < len(curr.fields):
+                                    _, curr = curr.fields[idx]
+                            elif isinstance(curr, TupleCxType):
+                                if 0 <= idx < len(curr.elems):
+                                    curr = curr.elems[idx]
+                            elif isinstance(curr, ArrCxType):
+                                curr = curr.elem
+                            elif isinstance(curr, EnumCxType):
+                                if idx == 0: curr = I32
+                                else: curr = ArrCxType(CHAR, 32)
+                except Exception:
+                    pass 
+                res_hir_etype = curr
+
+            res.hir_type = PtrCxType(res_hir_etype) if res_hir_etype else PtrCxType(VOID)
+            
+            # Hard-cast to the expected LLVM type if they mismatch (e.g. GEP returned struct-ptr instead of field-ptr)
+            expected_res_ll_ty = self._lower_type(res.hir_type)
+            if res.type != expected_res_ll_ty:
+                 res = b.bitcast(res, expected_res_ll_ty, name=f"{instr.dest}.cast")
+                 res.hir_type = PtrCxType(res_hir_etype)
+
+            self._vals[instr.dest] = res
+
+        # ---- Calls ----
+
         elif isinstance(instr, IRCall):
-            callee = self._funcs[instr.callee]
-            args = [self._vals[a.name] for a in instr.args]
-            res = self._builder.call(callee, args, name=instr.dest if instr.dest else "")
-            if instr.dest:
-                self._vals[instr.dest] = res
+            self._lower_call(instr)
+
+    def _lower_const(self, instr: IRConst) -> ll.Value:
+        assert self._builder is not None
+        b = self._builder
+
+        ty = instr.type
+        if isinstance(ty, PrimCxType) and ty.name == "str":
+            # Build fat pointer { i8*, i64 }
+            g, char_len = self._str_global(instr.value)
+            raw_ptr = b.bitcast(g, _i8p)
+            length  = ll.Constant(_i64, char_len)
+            fat     = b.insert_value(ll.Constant(_STR_TYPE, ll.Undefined), raw_ptr, 0)
+            fat     = b.insert_value(fat, length, 1, name=instr.dest)
+            return fat
+
+        if instr.value is None or (isinstance(ty, PrimCxType) and ty.name == "null"):
+            ll_ty = self._lower_type(ty)
+            return ll.Constant(ll_ty, None)
+
+        ll_ty = self._lower_type(ty)
+        try:
+            return ll.Constant(ll_ty, instr.value)
+        except Exception:
+            return ll.Constant(ll_ty, 0)
+
+    def _lower_binop(self, instr: IRBinOp) -> ll.Value:
+        assert self._builder is not None
+        b  = self._builder
+        lv = self._vals[instr.left.name]
+        rv = self._vals[instr.right.name]
+
+        is_fp     = False
+        is_signed = True
+        if isinstance(instr.type, PrimCxType):
+            is_fp     = instr.type.is_fp
+            is_signed = instr.type.signed
+
+        op = instr.op
+
+        # Arithmetic
+        if op == "+":
+            return b.fadd(lv, rv, name=instr.dest) if is_fp else b.add(lv, rv, name=instr.dest)
+        if op == "-":
+            return b.fsub(lv, rv, name=instr.dest) if is_fp else b.sub(lv, rv, name=instr.dest)
+        if op == "*":
+            return b.fmul(lv, rv, name=instr.dest) if is_fp else b.mul(lv, rv, name=instr.dest)
+        if op == "/":
+            if is_fp:       return b.fdiv(lv, rv, name=instr.dest)
+            if is_signed:   return b.sdiv(lv, rv, name=instr.dest)
+            return b.udiv(lv, rv, name=instr.dest)
+        if op == "%":
+            if is_fp:       return b.frem(lv, rv, name=instr.dest)
+            if is_signed:   return b.srem(lv, rv, name=instr.dest)
+            return b.urem(lv, rv, name=instr.dest)
+
+        # Bitwise
+        if op == "&":   return b.and_(lv, rv, name=instr.dest)
+        if op == "|":   return b.or_(lv, rv, name=instr.dest)
+        if op == "^":   return b.xor(lv, rv, name=instr.dest)
+        if op == "<<":  return b.shl(lv, rv, name=instr.dest)
+        if op == ">>":
+            return b.ashr(lv, rv, name=instr.dest) if is_signed else b.lshr(lv, rv, name=instr.dest)
+
+        # Comparisons
+        if op == "==":
+            return b.fcmp_ordered("==", lv, rv, name=instr.dest) if is_fp \
+                else b.icmp_signed("==", lv, rv, name=instr.dest)
+        if op == "!=":
+            return b.fcmp_unordered("!=", lv, rv, name=instr.dest) if is_fp \
+                else b.icmp_signed("!=", lv, rv, name=instr.dest)
+        if op == "<":
+            if is_fp:       return b.fcmp_ordered("<", lv, rv, name=instr.dest)
+            if is_signed:   return b.icmp_signed("<", lv, rv, name=instr.dest)
+            return b.icmp_unsigned("<", lv, rv, name=instr.dest)
+        if op == ">":
+            if is_fp:       return b.fcmp_ordered(">", lv, rv, name=instr.dest)
+            if is_signed:   return b.icmp_signed(">", lv, rv, name=instr.dest)
+            return b.icmp_unsigned(">", lv, rv, name=instr.dest)
+        if op == "<=":
+            if is_fp:       return b.fcmp_ordered("<=", lv, rv, name=instr.dest)
+            if is_signed:   return b.icmp_signed("<=", lv, rv, name=instr.dest)
+            return b.icmp_unsigned("<=", lv, rv, name=instr.dest)
+        if op == ">=":
+            if is_fp:       return b.fcmp_ordered(">=", lv, rv, name=instr.dest)
+            if is_signed:   return b.icmp_signed(">=", lv, rv, name=instr.dest)
+            return b.icmp_unsigned(">=", lv, rv, name=instr.dest)
+
+        raise NotImplementedError(f"Unsupported binary operator: {op!r}")
+
+    def _lower_unop(self, instr: IRUnOp) -> ll.Value:
+        assert self._builder is not None
+        b   = self._builder
+        val = self._vals[instr.operand.name]
+        op  = instr.op
+
+        is_fp = isinstance(instr.type, PrimCxType) and instr.type.is_fp
+
+        if op == "-":
+            return b.fneg(val, name=instr.dest) if is_fp else b.neg(val, name=instr.dest)
+        if op in ("!", "not"):
+            # Logical NOT: val == 0
+            zero = ll.Constant(val.type, 0)
+            return b.icmp_signed("==", val, zero, name=instr.dest)
+        if op == "~":
+            # Bitwise NOT: val XOR -1
+            minus_one = ll.Constant(val.type, -1)
+            return b.xor(val, minus_one, name=instr.dest)
+
+        raise NotImplementedError(f"Unsupported unary operator: {op!r}")
+
+    def _lower_cast(self, instr: IRCast) -> ll.Value:
+        assert self._builder is not None
+        b    = self._builder
+        val  = self._vals[instr.value.name]
+        dest = self._lower_type(instr.to_type)
+        op   = instr.cast_op  # e.g. "trunc", "zext", "sext", "fpext", "fptrunc",
+                               #      "fptoui", "fptosi", "uitofp", "sitofp",
+                               #      "inttoptr", "ptrtoint", "bitcast"
+
+        cast_fn = {
+            "trunc":    b.trunc,
+            "zext":     b.zext,
+            "sext":     b.sext,
+            "fpext":    b.fpext,
+            "fptrunc":  b.fptrunc,
+            "fptoui":   b.fptoui,
+            "fptosi":   b.fptosi,
+            "uitofp":   b.uitofp,
+            "sitofp":   b.sitofp,
+            "inttoptr": b.inttoptr,
+            "ptrtoint": b.ptrtoint,
+            "bitcast":  b.bitcast,
+        }.get(op)
+
+        if cast_fn is None:
+            raise NotImplementedError(f"Unsupported cast op: {op!r}")
+        return cast_fn(val, dest, name=instr.dest)
+
+    def _lower_call(self, instr: IRCall) -> None:
+        assert self._builder is not None
+        b = self._builder
+
+        # Lazily declare unknown callees as external functions
+        if instr.callee not in self._funcs:
+            ret_ll  = self._lower_type(instr.ret_ty)
+            args_ll = [self._lower_type(a.type) for a in instr.args]
+            fn_ty   = ll.FunctionType(ret_ll, args_ll)
+            self._funcs[instr.callee] = ll.Function(
+                self.module, fn_ty, name=instr.callee
+            )
+
+        callee = self._funcs[instr.callee]
+        param_types = list(callee.function_type.args)
+
+        # Build coerced argument list
+        raw_args = [self._vals[a.name] for a in instr.args]
+        args: List[ll.Value] = []
+        for i, (arg, param_ty) in enumerate(zip(raw_args, param_types)):
+            args.append(self._coerce_arg(arg, param_ty))
+        # Variadic tail (no declared param type to coerce against)
+        args.extend(raw_args[len(param_types):])
+
+        res = b.call(callee, args, name=instr.dest if instr.dest else "")
+        if instr.dest:
+            res.hir_type = instr.ret_ty
+            self._vals[instr.dest] = res
+
+    # ---------------------------------------------------------------- terminator lowering
 
     def _lower_terminator(self, term: Any) -> None:
         assert self._builder is not None
-        
+        b = self._builder
+
         if isinstance(term, IRRet):
-            if term.value:
-                self._builder.ret(self._vals[term.value.name])
+            if term.value is None:
+                b.ret_void()
             else:
-                self._builder.ret_void()
-                
+                val = self._vals[term.value.name]
+                # Coerce to declared return type if needed
+                ret_ty = b.block.parent.function_type.return_type
+                b.ret(self._coerce_arg(val, ret_ty))
+
         elif isinstance(term, IRBr):
-            self._builder.branch(self._blocks[term.target])
-            
+            b.branch(self._blocks[term.target])
+
         elif isinstance(term, IRCondBr):
             cond = self._vals[term.cond.name]
-            tb = self._blocks[term.true_label]
-            fb = self._blocks[term.false_label]
-            self._builder.cbranch(cond, tb, fb)
-            
+            # Ensure condition is i1
+            if cond.type != ll.IntType(1):
+                cond = b.trunc(cond, ll.IntType(1))
+            b.cbranch(cond, self._blocks[term.true_label], self._blocks[term.false_label])
+
         elif isinstance(term, IRUnreachable):
-            self._builder.unreachable()
+            b.unreachable()
+
+        else:
+            raise NotImplementedError(f"Unknown terminator: {type(term).__name__}")
 
     # ---------------------------------------------------------------- optimization
 
     def _optimize(self) -> str:
         mod = llvm.parse_assembly(str(self.module))
-        
+        mod.verify()
+
+        opt = self.opts.llvm_opt
+        if opt == 0:
+            return str(mod)
+
         try:
-            # Modern LLVM NewPassManager (llvmlite >= 0.40)
+            # New Pass Manager (llvmlite >= 0.40)
             pto = llvm.create_pipeline_tuning_options()
-            if self.opts.llvm_opt > 0:
-                pto.loop_unrolling = True
-                pto.loop_vectorization = True
-                pto.slp_vectorization = True
-                
+            pto.loop_unrolling    = opt >= 2
+            pto.loop_vectorization = opt >= 2
+            pto.slp_vectorization  = opt >= 2
+
             pb = llvm.create_pass_builder(self.target_machine, pto)
             pm = llvm.create_new_module_pass_manager()
-            
-            # Add passes based on optimization level
-            if self.opts.llvm_opt > 0:
+
+            if opt >= 1:
                 pm.add_sroa_pass()
                 pm.add_instruction_combine_pass()
                 pm.add_simplify_cfg_pass()
                 pm.add_reassociate_pass()
-            if self.opts.llvm_opt > 1:
+            if opt >= 2:
                 pm.add_global_opt_pass()
                 pm.add_loop_rotate_pass()
                 pm.add_loop_unroll_pass()
-            if self.opts.llvm_opt > 2:
+                # GVN removed in new pass manager, instruction combining + CSE covers it mostly
+                pm.add_memcpy_optimize_pass()
+                pm.add_sccp_pass()
+            if opt >= 3:
                 pm.add_dead_arg_elimination_pass()
-                
+                pm.add_aggressive_dead_code_elimination_pass()
+                pm.add_merge_functions_pass()
+
             pm.run(mod, pb)
-        except Exception:
-            pass # degrade gracefully and just return the unoptimized module
-            
+        except Exception as exc:
+            # Degrade gracefully — unoptimized IR is still correct IR
+            import warnings
+            warnings.warn(f"LLVM optimization failed, emitting unoptimized IR: {exc}")
+
         return str(mod)
 
-    # ---------------------------------------------------------------- object generation
+    # ---------------------------------------------------------------- object / asm emission
 
     def emit_object(self, ir_str: str, outfile: str) -> None:
         mod = llvm.parse_assembly(ir_str)
-        obj_bin = self.target_machine.emit_object(mod)
         with open(outfile, "wb") as f:
-            f.write(obj_bin)
-            
+            f.write(self.target_machine.emit_object(mod))
+
     def emit_asm(self, ir_str: str, outfile: str) -> None:
         mod = llvm.parse_assembly(ir_str)
-        asm = self.target_machine.emit_assembly(mod)
-        with open(outfile, "w", encoding='utf8') as f:
-            f.write(asm)
+        with open(outfile, "w", encoding="utf-8") as f:
+            f.write(self.target_machine.emit_assembly(mod))

@@ -37,8 +37,12 @@ class RelocatableLinker:
         
         args: List[str] = [self.cc, input_obj, "-o", output_exe]
         
-        # Adding m for math library (used by standard double operations) on Linux/mac
-        if os.name != 'nt':
+        # Library linking
+        if os.name == 'nt':
+            # On Windows, we need kernel32 for basic OS functions
+            args.extend(["-lkernel32", "-luser32"])
+        else:
+            # Adding m for math library on Linux/mac
             args.append("-lm")
         try:
             res = subprocess.run(args, capture_output=True, check=True)

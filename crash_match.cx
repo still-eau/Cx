@@ -1,0 +1,13 @@
+enum Status {
+    Ok
+    Error
+}
+
+func main() -> int {
+    set::Status s = Status::Ok;
+    match s {
+        Status::Ok => { return 0; }
+        Status::Error => { return 1; }
+    }
+    return 0;
+}

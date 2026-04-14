@@ -1,9 +1,9 @@
 """Type-checker and semantic analyser for the Cx language.
 
 Performs a two-pass walk over the AST:
-  Pass 1 — collect all top-level declarations into the symbol table
+  Pass 1 - collect all top-level declarations into the symbol table
             (so forward references inside the same module work).
-  Pass 2 — visit every node, resolve names, infer and verify types,
+  Pass 2 - visit every node, resolve names, infer and verify types,
             and annotate every Expr.resolved_type.
 
 Errors are reported via ErrorReporter (non-fatal where possible).
@@ -12,7 +12,7 @@ Errors are reported via ErrorReporter (non-fatal where possible).
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing      import List, Optional, Dict, Any, Iterator
+from typing      import List, Optional, Dict, Any, Iterator, Set
 import os
 
 from ...frontend.ast import *
@@ -38,21 +38,58 @@ class TypeChecker:
         self._fail_stack: List[Optional[CxType]] = []
         # currently resolved obj/enum types by name
         self._types: Dict[str, CxType] = {}
+        # loaded module paths to avoid infinite recursion
+        self._loaded_modules: Set[str] = set()
+        self._builtins: Dict[str, FuncDecl] = self._make_builtins()
+
+    def _make_builtins(self) -> Dict[str, FuncDecl]:
+        """Define compiler-intrinsic functions."""
+        loc = UNKNOWN_LOC
+        
+        # print(set::str s)
+        print_fn = FuncDecl(loc, True, "print", [], 
+                           [ParamDecl(loc, "set", PrimType(loc, "str"), "s")], 
+                           None, None, None)
+                           
+        # allocate(set::uint size) -> void[ptr]
+        alloc_fn = FuncDecl(loc, True, "allocate", [],
+                           [ParamDecl(loc, "set", PrimType(loc, "uint"), "size")],
+                           ModifiedType(loc, PrimType(loc, "void"), ["ptr"]), None, None)
+                           
+        # deallocate(set::void[ptr] p)
+        free_fn = FuncDecl(loc, True, "deallocate", [],
+                          [ParamDecl(loc, "set", ModifiedType(loc, PrimType(loc, "void"), ["ptr"]), "p")],
+                          None, None, None)
+                          
+        return {"print": print_fn, "allocate": alloc_fn, "deallocate": free_fn}
 
     # ================================================================
     # Public entry point
     # ================================================================
 
     def check(self, program: Program) -> None:
+        self._current_program = program
+        
+        # Register builtins in the global scope
+        for name, fn in self._builtins.items():
+            sym = Symbol(name, SymKind.FUNC, fn.loc, ast_node=fn)
+            self._tbl.define(sym)
+            
         self._collect_top_level(program)
-        for item in program.items:
+        
+        i = 0
+        while i < len(program.items):
+            item = program.items[i]
             self._check_item(item)
+            i += 1
 
     # ================================================================
     # Pass 1: collect declarations
     # ================================================================
 
     def _collect_top_level(self, program: Program) -> None:
+        for imp in program.imports:
+            self._declare_item(imp)
         for item in program.items:
             self._declare_item(item)
 
@@ -93,18 +130,57 @@ class TypeChecker:
         elif isinstance(item, ImportDirective):
             # Verify if module exists physically (simple heuristics for now)
             # Remove any trailing "()" from selective imports or paths
-            clean_path = item.full_path.split('{')[0].strip('/').replace('()', '')
+            clean_path = item.path.split('{')[0].strip('/').replace('()', '')
             
-            # Paths to check (relative current dir, or as .cx file)
-            path_file = f"{clean_path}.cx"
-            path_dir = clean_path
+            # Paths to check relative to the source file's directory
+            source_dir = os.path.abspath(os.path.dirname(self._rep._filename))
+            path_file  = os.path.normpath(os.path.join(source_dir, clean_path + ".cx"))
+            path_dir   = os.path.normpath(os.path.join(source_dir, clean_path))
             
             if not os.path.exists(path_file) and not os.path.exists(path_dir):
-                self._rep.error(
-                    f"module '{item.full_path}' not found",
-                    item.loc,
-                    hint=f"Checked '{path_file}' and '{path_dir}'. Stdlibs might not be implemented yet."
-                )
+                # Retry with CWD if source_dir failed (fallback for some environments)
+                path_file_alt = os.path.normpath(os.path.join(os.getcwd(), clean_path + ".cx"))
+                if os.path.exists(path_file_alt):
+                    path_file = path_file_alt
+                else:
+                    self._rep.error(
+                        f"module '{item.path}' not found",
+                        item.loc,
+                        hint=f"Checked '{path_file}' and '{path_dir}' (source_dir={source_dir})."
+                    )
+                    return
+            
+            path_file = os.path.abspath(path_file)
+            if path_file in self._loaded_modules:
+                return
+            self._loaded_modules.add(path_file)
+            
+            import sys
+            sys.stderr.write(f"DEBUG: Loading module from {path_file}\n")
+            
+            # Load and parse the module
+            if os.path.exists(path_file):
+                try:
+                    with open(path_file, "r") as f:
+                        source = f.read()
+                    from ...frontend.lexer import Lexer
+                    from ...frontend.parser import Parser
+                    tokens = Lexer(source).tokenize()
+                    parser = Parser(tokens, path_file, source, reporter=self._rep)
+                    imported_program = parser.parse()
+                    
+                    # We need to temporarily swap _current_program to collect items correctly
+                    old_program = self._current_program
+                    self._current_program = imported_program
+                    self._collect_top_level(imported_program)
+                    self._current_program = old_program
+                    
+                    # Flatten into main program
+                    for subitem in imported_program.items:
+                        if hasattr(self, '_current_program'):
+                            self._current_program.items.append(subitem)
+                except Exception as e:
+                    self._rep.error(f"failed to load module '{item.path}': {e}", item.loc)
 
     # ================================================================
     # Pass 2: item checking
@@ -141,6 +217,11 @@ class TypeChecker:
 
             ret_type  = self._resolve_type_node(fn.ret_type)  if fn.ret_type  else VOID
             fail_type = self._resolve_type_node(fn.fail_type) if fn.fail_type else None
+
+            if fn.ret_type:
+                fn.ret_type.resolved_type = ret_type
+            if fn.fail_type:
+                fn.fail_type.resolved_type = fail_type
 
             self._ret_stack.append(ret_type)
             self._fail_stack.append(fail_type)
@@ -314,17 +395,25 @@ class TypeChecker:
         if isinstance(stmt, ForRangeStmt):
             self._check_expr(stmt.range_expr)
             with self._scope():
+                # Derive loop variable type from range bounds (usually I32)
                 self._tbl.define(Symbol(stmt.var, SymKind.VAR, stmt.loc, cx_type=I32))
                 self._check_block(stmt.body)
         elif isinstance(stmt, ForInStmt):
             ity = self._check_expr(stmt.iterable)
             with self._scope():
-                self._tbl.define(Symbol(stmt.item_var, SymKind.VAR, stmt.loc, cx_type=VOID))
+                # Item type should be derived from iterable (array element or pointer target)
+                item_ty = VOID
+                if isinstance(ity, ArrCxType): item_ty = ity.elem
+                elif isinstance(ity, PtrCxType): item_ty = ity.pointee
+                
+                self._tbl.define(Symbol(stmt.item_var, SymKind.VAR, stmt.loc, cx_type=item_ty))
                 if stmt.idx_var:
                     self._tbl.define(Symbol(stmt.idx_var, SymKind.VAR, stmt.loc, cx_type=I32))
                 self._check_block(stmt.body)
         elif isinstance(stmt, ForCondStmt):
-            self._check_expr(stmt.cond)
+            ct = self._check_expr(stmt.cond)
+            if not types_equal(ct, BOOL):
+                self._rep.error(f"for condition must be bool, got {ct!r}", stmt.loc)
             self._check_block(stmt.body)
         elif isinstance(stmt, ForInfiniteStmt):
             self._check_block(stmt.body)
@@ -636,36 +725,43 @@ class TypeChecker:
     def _resolve_type_node(self, node: Optional[TypeNode]) -> CxType:
         if node is None:
             return VOID
+        
+        res = VOID
         if isinstance(node, InferType):
-            return VOID   # will be inferred later
-        if isinstance(node, PrimType):
+            res = VOID   # will be inferred later
+        elif isinstance(node, PrimType):
             ty = prim_from_name(node.name)
-            return ty if ty is not None else VOID
-        if isinstance(node, NamedType):
+            res = ty if ty is not None else VOID
+        elif isinstance(node, NamedType):
             sym = self._tbl.resolve(node.name)
             if sym and sym.cx_type:
-                return sym.cx_type
-            ty = prim_from_name(node.name)
-            if ty:
-                return ty
-            self._rep.error(f"unknown type '{node.name}'", node.loc)
-            return VOID
-        if isinstance(node, GenericType):
+                res = sym.cx_type
+            else:
+                ty = prim_from_name(node.name)
+                if ty:
+                    res = ty
+                else:
+                    self._rep.error(f"unknown type '{node.name}'", node.loc)
+                    res = VOID
+        elif isinstance(node, GenericType):
             sym = self._tbl.resolve(node.name)
             if sym and isinstance(sym.cx_type, (ObjCxType, EnumCxType)):
-                return sym.cx_type   # simplified: ignore type args for now
-            return VOID
-        if isinstance(node, ModifiedType):
+                res = sym.cx_type   # simplified: ignore type args for now
+            else:
+                res = VOID
+        elif isinstance(node, ModifiedType):
             base = self._resolve_type_node(node.base)
-            return apply_modifiers(base, node.modifiers)
-        if isinstance(node, FuncType):
+            res = apply_modifiers(base, node.modifiers)
+        elif isinstance(node, FuncType):
             params = [self._resolve_type_node(p) for p in node.params]
             ret    = self._resolve_type_node(node.ret)
-            return FuncCxType(params, ret)
-        if isinstance(node, TupleType):
+            res = FuncCxType(params, ret)
+        elif isinstance(node, TupleType):
             elems = [self._resolve_type_node(e) for e in node.elems]
-            return TupleCxType(elems)
-        return VOID
+            res = TupleCxType(elems)
+        
+        node.resolved_type = res
+        return res
 
     # ================================================================
     # Compatibility helpers

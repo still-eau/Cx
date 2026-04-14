@@ -13,21 +13,20 @@ module main;
 
 ---
 
-## Inclure un module (Imports)
-
-L'inclusion de modules se fait via la directive `@include:`. Le langage utilise une syntaxe explicite permettant de savoir au premier coup d'œil la nature de ce qui est importé.
+L'inclusion de modules se fait via la directive `@import:` (ou son alias `@include:`). Le langage utilise une syntaxe explicite et épurée utilisant des chemins relatifs sans guillemets.
 
 ```cx
-@include:std/io;      // Inclut tout le module (utilisable via io::...)
-@include:std/mem;
-@include:./player;
+@import:std/io;        // Inclut tout le module (utilisable via io::...)
+@import:std/mem;
+@import:../../lib/net; // Chemin relatif sans guillemets
+@import:./player;
 ```
 
 ### Alias
 
 ```cx
-@include:std/io as terminal;
-@include:./net as network;
+@import:std/io as terminal;
+@import:./net as network;
 
 terminal::print("connected");
 network::connect("localhost");
@@ -38,9 +37,10 @@ network::connect("localhost");
 Lors d'une inclusion sélective, l'élément peut être explicitement marqué avec `()` si c'est une fonction. Les types, objets ou constantes n'ont pas de parenthèses. Cela rend la lecture des dépendances beaucoup plus claire.
 
 ```cx
-@include:std/io/print();         // C'est une fonction !
-@include:std/io/read_line();     // C'est une fonction !
-@include:std/io/File;            // C'est un type ou un objet ou un fichier entier
+```cx
+@import:std/io/print();         // C'est une fonction !
+@import:std/io/read_line();     // C'est une fonction !
+@import:std/io/File;            // C'est un type ou un objet
 
 // Utilisation directe
 print("hello");
@@ -49,7 +49,7 @@ print("hello");
 On peut également grouper plusieurs éléments pour éviter la répétition du chemin :
 
 ```cx
-@include:std/io/{ print(), read_line(), File };
+@import:std/io/{ print(), read_line(), File };
 ```
 
 ---

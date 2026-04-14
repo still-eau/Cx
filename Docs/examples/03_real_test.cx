@@ -1,0 +1,43 @@
+obj Node {
+    set::int value;
+    set::Node[ptr][opt] next;
+}
+
+enum Status {
+    Ok
+    Error{set::str msg}
+}
+
+func main() -> int {
+    // 1. Struct and Allocation
+    set::Node[ptr] head = alloc(Node, 1);
+    head.value = 42;
+    head.next = null;
+
+    // 2. Logic and IfExpr
+    set::str msg = if head.value == 42 { "Value is correct" } else { "Value is wrong" };
+    print(msg);
+
+    // 3. For loop
+    print("Looping:");
+    for i in 0..3 {
+         print("Loop iteration");
+    }
+
+    // 4. Match and Enum
+    set::Status s = Status::Error{msg = "Something went wrong"};
+    match s {
+        Status::Ok => {
+            print("Status is OK");
+        }
+        Status::Error{msg} => {
+            print("Error: ");
+            print(msg);
+        }
+    }
+
+    // 5. Cleanup
+    free(head);
+    
+    return 0;
+}
