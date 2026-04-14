@@ -1,0 +1,104 @@
+// Cx example - Kernel-style simple memory allocator
+
+module allocator;
+
+@import:std/io as io;
+
+// -----------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------
+
+const::uint HEAP_SIZE = 1_048_576;    // 1 MiB
+
+obj Header {
+    set::uint size;
+    set::bool is_free;
+}
+
+enum AllocError {
+    OutOfMemory,
+    InvalidFree,
+}
+
+// -----------------------------------------------------------------------
+// Global State
+// -----------------------------------------------------------------------
+
+set::int[ptr][opt] heap_start = null;
+set::uint          heap_used  = 0;
+
+// -----------------------------------------------------------------------
+// Initialization
+// -----------------------------------------------------------------------
+
+pub func init() -> void | fail AllocError {
+    heap_start = alloc(int, HEAP_SIZE);
+    if heap_start == null {
+        fail AllocError::OutOfMemory;
+    }
+    heap_used = 0;
+}
+
+// -----------------------------------------------------------------------
+// Allocation
+// -----------------------------------------------------------------------
+
+pub func halloc(set::uint size) -> int[ptr] | fail AllocError {
+    set::uint total = size + sizeof(Header);
+
+    if heap_used + total > HEAP_SIZE {
+        fail AllocError::OutOfMemory;
+    }
+
+    @unsafe {
+        set::Header[ptr] header = cast(Header[ptr], heap_start + heap_used);
+        header.size    = size;
+        header.is_free = false;
+        heap_used     += total;
+        
+        return cast(int[ptr], header) + sizeof(Header);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Free
+// -----------------------------------------------------------------------
+
+pub func hfree(set::int[ptr] p) -> void | fail AllocError {
+    if p == null { fail AllocError::InvalidFree; }
+
+    @unsafe {
+        set::Header[ptr] header = cast(Header[ptr], p - sizeof(Header));
+
+        if header.is_free {
+            fail AllocError::InvalidFree;
+        }
+        header.is_free = true;
+    }
+}
+
+// -----------------------------------------------------------------------
+// Entry Point
+// -----------------------------------------------------------------------
+
+func main() -> int {
+    try init() catch {
+        io::print("Allocator init failed");
+        return 1;
+    };
+
+    set::int[ptr] buf = try halloc(256) catch {
+        io::print("Allocation failed");
+        return 1;
+    };
+
+    memset(buf, 0, 256);
+    io::print("256 bytes allocated successfully");
+
+    try hfree(buf) catch {
+        io::print("Free failed");
+        return 1;
+    };
+
+    return 0;
+}

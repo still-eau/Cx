@@ -1,0 +1,66 @@
+// Cx example - Linked List and Generics
+
+module main;
+
+@import:std/io as io;
+
+// -----------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------
+
+obj Node<T> {
+    set::T                 value;
+    set::Node<T>[ptr][opt] next;
+}
+
+obj LinkedList<T> {
+    set::Node<T>[ptr][opt] head;
+    
+    func push(set::T value) -> void {
+        set::Node<T>[ptr] new_node = alloc(Node<T>, 1);
+        new_node.value = value;
+        new_node.next  = self.head;
+        
+        self.head = new_node;
+    }
+    
+    func print_all() -> void {
+        set::Node<T>[ptr][opt] current = self.head;
+        
+        for current != null {
+            io::print(current.value);
+            current = current.next;
+        }
+    }
+    
+    func free_all() -> void {
+        set::Node<T>[ptr][opt] current = self.head;
+        
+        for current != null {
+            set::Node<T>[ptr] next_node = current.next;
+            free(current);
+            current = next_node;
+        }
+        
+        self.head = null;
+    }
+}
+
+// -----------------------------------------------------------------------
+// Main
+// -----------------------------------------------------------------------
+
+func main() -> int {
+    set::LinkedList<int> list = LinkedList { head = null };
+    
+    list.push(10);
+    list.push(20);
+    list.push(30);
+    
+    io::print("List elements:");
+    list.print_all();
+    
+    list.free_all();
+    
+    return 0;
+}

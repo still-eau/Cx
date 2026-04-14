@@ -1,0 +1,68 @@
+// Cx example - Enums and Pattern Matching (Polymorphism)
+
+module main;
+
+@import:std/io/print();
+
+// -----------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------
+
+enum Shape {
+    Circle { 
+        set::flt radius; 
+    },
+    Rectangle { 
+        set::flt width; 
+        set::flt height; 
+    },
+    Point,
+}
+
+// -----------------------------------------------------------------------
+// Logic
+// -----------------------------------------------------------------------
+
+func calculate_area(set::Shape shape) -> flt {
+    return match shape {
+        Shape::Circle { radius }          => radius * radius * 3.14159,
+        Shape::Rectangle { width, height } => width * height,
+        Shape::Point                      => 0.0,
+    };
+}
+
+func print_shape_info(set::Shape shape) -> void {
+    match shape {
+        Shape::Circle { radius } => {
+            print("Circle with radius: ", radius);
+        }
+        Shape::Rectangle { width, height } => {
+            print("Rectangle [", width, " x ", height, "]");
+        }
+        Shape::Point => {
+            print("Just a point");
+        }
+    }
+    
+    set::flt area = calculate_area(shape);
+    print("Area: ", area);
+}
+
+// -----------------------------------------------------------------------
+// Main
+// -----------------------------------------------------------------------
+
+func main() -> int {
+    set::Shape circle = Shape::Circle { radius = 5.0 };
+    set::Shape rect   = Shape::Rectangle { width = 4.0, height = 6.0 };
+    set::Shape point  = Shape::Point;
+    
+    print("--- Shape Info ---");
+    print_shape_info(circle);
+    print("");
+    print_shape_info(rect);
+    print("");
+    print_shape_info(point);
+    
+    return 0;
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cx"
+version = "0.1.0"
+description = "Compiler for the Cx programming language"
+authors = [{name = "Stilau"}]
+dependencies = [
+    "llvmlite",      # Binding Python pour LLVM (Génération de code natif optimisé)
+    "lark",          # Parseur moderne et performant (Génération de l'AST)
+    "typer",         # Création d'une belle interface CLI facilement
+    "rich"           # Affichage stylisé dans le terminal (pour les erreurs type Rustc)
+]
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",        # Framework de test
+    "black",         # Formateur de code Python
+    "mypy"           # Typage statique Python
+]
+
+[project.scripts]
+cx = "cx.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cx"]

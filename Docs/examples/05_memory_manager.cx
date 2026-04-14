@@ -1,0 +1,429 @@
+// mem_manager.cx -- comprehensive Cx showcase
+// Covers: obj, enum, generics, @unsafe, fail/try/catch, bitwise, match,
+//         for-labels, pool bitmask, arena bump, free-list coalescing, pub
+
+module mem_manager;
+
+@import:std/io as io;
+
+// ============================================================================
+// Error enum  (variants carry data)
+// ============================================================================
+
+enum MemError {
+    OutOfMemory { set::uint requested; set::uint available; },
+    InvalidFree { set::str  reason; },
+    Corruption  { set::uint address; },
+}
+
+// ============================================================================
+// Alignment utilities
+// ============================================================================
+
+// Round n up to the nearest multiple of align  (align must be a power of 2)
+@inline
+func align_up(set::uint n, set::uint align) -> uint {
+    return (n + align - 1) & ~(align - 1);
+}
+
+@inline
+func is_pow2(set::uint n) -> bool {
+    return n != 0 && (n & (n - 1)) == 0;
+}
+
+// Integer log2 using unsigned right shift
+func ilog2(set::uint n) -> uint {
+    set::uint r = 0;
+    for n > 1 {
+        n >>>= 1;
+        r++;
+    }
+    return r;
+}
+
+// ============================================================================
+// BlockHeader -- free-list node embedded at the start of every allocation
+// ============================================================================
+
+obj BlockHeader {
+    set::uint                  size;
+    set::bool                  is_free;
+    set::BlockHeader[ptr][opt] prev;
+    set::BlockHeader[ptr][opt] next;
+}
+
+const::uint HDR_SZ    = sizeof(BlockHeader);
+const::uint MIN_SPLIT = 32;
+
+// ============================================================================
+// FreeList allocator  (first-fit with bidirectional coalescing)
+// ============================================================================
+
+pub obj FreeList {
+    set::int[ptr][opt]         base;
+    set::uint                  cap;
+    set::uint                  used;
+    set::BlockHeader[ptr][opt] head;
+
+    pub func init(set::int[ptr] buf, set::uint capacity) -> void {
+        self.base = buf;
+        self.cap  = capacity;
+        self.used = 0;
+        @unsafe {
+            set::BlockHeader[ptr] first = cast(BlockHeader[ptr], buf);
+            first.size    = capacity - HDR_SZ;
+            first.is_free = true;
+            first.prev    = null;
+            first.next    = null;
+            self.head     = first;
+        }
+    }
+
+    // First-fit search; splits block when remainder is large enough
+    @unsafe
+    pub func alloc(set::uint size) -> int[ptr] | fail MemError {
+        set::uint need = align_up(size, 8);
+        if need < 8 { need = 8; }
+
+        set::BlockHeader[ptr][opt] cur = self.head;
+        for cur != null {
+            if cur.is_free && cur.size >= need {
+                // Split only when the remainder can hold a header + payload
+                if cur.size >= need + HDR_SZ + MIN_SPLIT {
+                    set::BlockHeader[ptr] tail = cast(BlockHeader[ptr],
+                        cast(int[ptr], cur) + HDR_SZ + need);
+                    tail.size    = cur.size - need - HDR_SZ;
+                    tail.is_free = true;
+                    tail.prev    = cur;
+                    tail.next    = cur.next;
+                    if cur.next != null { cur.next.prev = tail; }
+                    cur.next = tail;
+                    cur.size = need;
+                }
+                cur.is_free  = false;
+                self.used   += cur.size + HDR_SZ;
+                return cast(int[ptr], cur) + HDR_SZ;
+            }
+            cur = cur.next;
+        }
+
+        fail MemError::OutOfMemory {
+            requested = size,
+            available = self.cap - self.used,
+        };
+    }
+
+    // Free p and coalesce adjacent free blocks in both directions
+    @unsafe
+    pub func dealloc(set::int[ptr] p) -> void | fail MemError {
+        if p == null {
+            fail MemError::InvalidFree { reason = "null pointer" };
+        }
+
+        set::BlockHeader[ptr] hdr = cast(BlockHeader[ptr], p - HDR_SZ);
+        if hdr.is_free {
+            fail MemError::InvalidFree { reason = "double free" };
+        }
+
+        hdr.is_free  = true;
+        self.used   -= hdr.size + HDR_SZ;
+
+        // Merge with the successor if it is also free
+        if hdr.next != null && hdr.next.is_free {
+            set::BlockHeader[ptr] nxt = hdr.next;
+            hdr.size += HDR_SZ + nxt.size;
+            hdr.next  = nxt.next;
+            if nxt.next != null { nxt.next.prev = hdr; }
+        }
+
+        // Merge with the predecessor if it is also free
+        if hdr.prev != null && hdr.prev.is_free {
+            set::BlockHeader[ptr] prv = hdr.prev;
+            prv.size += HDR_SZ + hdr.size;
+            prv.next  = hdr.next;
+            if hdr.next != null { hdr.next.prev = prv; }
+        }
+    }
+
+    // Walk the linked list and print each block's state
+    @unsafe
+    pub func dump() -> void {
+        set::BlockHeader[ptr][opt] cur = self.head;
+        set::uint i = 0;
+        io::print("[FreeList] cap=", self.cap, " used=", self.used);
+        for cur != null {
+            set::str tag = if cur.is_free { "free" } else { "used" };
+            io::print("  block[", i, "] size=", cur.size, " (", tag, ")");
+            cur = cur.next;
+            i++;
+        }
+    }
+
+    pub func bytes_used()  -> uint { return self.used; }
+    pub func bytes_free()  -> uint { return self.cap - self.used; }
+}
+
+// ============================================================================
+// Arena allocator  (bump pointer, reset-only -- no per-pointer deallocation)
+// ============================================================================
+
+pub obj Arena {
+    set::int[ptr][opt] base;
+    set::uint          cap;
+    set::uint          off;
+
+    pub func init(set::int[ptr] buf, set::uint capacity) -> void {
+        self.base = buf;
+        self.cap  = capacity;
+        self.off  = 0;
+    }
+
+    // Bump-allocate `size` bytes aligned to `align`
+    @unsafe
+    pub func push(set::uint size, set::uint align) -> int[ptr] | fail MemError {
+        set::uint cur     = cast(uint, self.base) + self.off;
+        set::uint aligned = align_up(cur, align);
+        set::uint total   = (aligned - cur) + size;
+
+        if self.off + total > self.cap {
+            fail MemError::OutOfMemory {
+                requested = size,
+                available = self.cap - self.off,
+            };
+        }
+
+        self.off += total;
+        return cast(int[ptr], aligned);
+    }
+
+    // Discard every allocation at once -- O(1)
+    pub func reset() -> void { self.off = 0; }
+
+    pub func used()  -> uint { return self.off; }
+    pub func avail() -> uint { return self.cap - self.off; }
+}
+
+// ============================================================================
+// Pool<T>  -- generic fixed-size block pool backed by a bitmask (up to 64 slots)
+// ============================================================================
+
+const::uint POOL_CAP = 64;
+
+pub obj Pool<T> where T: Eq {
+    set::T[ptr][opt] slab;
+    set::uint        bitmap;   // bit N = 1 means slot N is occupied
+    set::uint        live;
+
+    pub func init(set::T[ptr] storage) -> void {
+        self.slab   = storage;
+        self.bitmap = 0;
+        self.live   = 0;
+    }
+
+    // Return the index of the first free slot
+    pub func acquire() -> uint | fail MemError {
+        if self.live >= POOL_CAP {
+            fail MemError::OutOfMemory { requested = sizeof(T), available = 0 };
+        }
+
+        set::uint mask = self.bitmap;
+        set::uint slot = 0;
+        for slot < POOL_CAP {
+            if (mask & 1) == 0 {
+                self.bitmap |= 1 << slot;
+                self.live++;
+                return slot;
+            }
+            mask >>= 1;
+            slot++;
+        }
+
+        fail MemError::OutOfMemory { requested = sizeof(T), available = 0 };
+    }
+
+    pub func release(set::uint slot) -> void | fail MemError {
+        if slot >= POOL_CAP {
+            fail MemError::InvalidFree { reason = "slot index out of range" };
+        }
+        set::uint bit = 1 << slot;
+        if (self.bitmap & bit) == 0 {
+            fail MemError::InvalidFree { reason = "slot already free" };
+        }
+        self.bitmap &= ~bit;
+        self.live--;
+    }
+
+    @unsafe
+    pub func get(set::uint slot) -> T[ptr] | fail MemError {
+        if slot >= POOL_CAP || (self.bitmap & (1 << slot)) == 0 {
+            fail MemError::InvalidFree { reason = "invalid or free slot" };
+        }
+        return self.slab + slot;
+    }
+
+    pub func count()    -> uint { return self.live; }
+    pub func capacity() -> uint { return POOL_CAP; }
+}
+
+// ============================================================================
+// Allocator enum  --  dispatch without interfaces
+// ============================================================================
+
+enum Allocator {
+    FL   { set::FreeList[ptr] inner; },
+    Bump { set::Arena[ptr]    inner; },
+}
+
+func mem_alloc(set::Allocator a, set::uint n) -> int[ptr] | fail MemError {
+    return match a {
+        Allocator::FL   { inner } => try inner.alloc(n),
+        Allocator::Bump { inner } => try inner.push(n, 8),
+    };
+}
+
+func mem_free(set::Allocator a, set::int[ptr] p) -> void | fail MemError {
+    match a {
+        Allocator::FL   { inner } => try inner.dealloc(p),
+        Allocator::Bump { inner } => {
+            fail MemError::InvalidFree {
+                reason = "arena does not support per-pointer deallocation",
+            };
+        }
+    }
+}
+
+// ============================================================================
+// Error display helper
+// ============================================================================
+
+@inline
+func show_err(set::MemError e) -> void {
+    set::str msg = match e {
+        MemError::OutOfMemory { requested, available } =>
+            "OOM: need=" + requested + " avail=" + available,
+        MemError::InvalidFree { reason } =>
+            "bad free: " + reason,
+        MemError::Corruption  { address } =>
+            "heap corruption at 0x" + address,
+    };
+    io::print("[MemError] ", msg);
+}
+
+// ============================================================================
+// Main  --  exercises all three allocators and the dispatch enum
+// ============================================================================
+
+func main() -> int {
+
+    // -- FreeList --------------------------------------------------------
+    const::uint FL_CAP = 4_096;
+    set::int[ptr] fl_buf = alloc(int, FL_CAP);
+    set::FreeList fl;
+    fl.init(fl_buf, FL_CAP);
+
+    // Use the dispatch enum for the first batch of allocations
+    set::Allocator via_fl = Allocator::FL { inner = &fl };
+
+    set::int[ptr][opt] a = mem_alloc(via_fl, 128) catch err { show_err(err); null };
+    set::int[ptr][opt] b = mem_alloc(via_fl, 256) catch err { show_err(err); null };
+    set::int[ptr][opt] c = mem_alloc(via_fl, 64)  catch err { show_err(err); null };
+
+    fl.dump();
+
+    // Free the middle block then reallocate -- tests coalescing
+    if b != null {
+        mem_free(via_fl, b) catch err { show_err(err); }
+        b = null;
+    }
+    set::int[ptr][opt] d = mem_alloc(via_fl, 200) catch err { show_err(err); null };
+
+    fl.dump();
+    io::print("FreeList: used=", fl.bytes_used(), " free=", fl.bytes_free());
+
+    if a != null { fl.dealloc(a) catch err { show_err(err); } }
+    if c != null { fl.dealloc(c) catch err { show_err(err); } }
+    if d != null { fl.dealloc(d) catch err { show_err(err); } }
+
+    free(fl_buf);
+
+    // -- Arena -----------------------------------------------------------
+    const::uint ARENA_CAP = 8_192;
+    set::int[ptr] ar_buf = alloc(int, ARENA_CAP);
+    set::Arena ar;
+    ar.init(ar_buf, ARENA_CAP);
+
+    set::int[ptr][opt] x = ar.push(64,  8)  catch err { show_err(err); null };
+    set::int[ptr][opt] y = ar.push(256, 16) catch err { show_err(err); null };
+    set::int[ptr][opt] z = ar.push(512, 4)  catch err { show_err(err); null };
+
+    io::print("Arena: used=", ar.used(), " avail=", ar.avail());
+
+    // Write through the raw pointers
+    if x != null { *x = 0xAA; }
+    if y != null { *y = 0xBB; }
+    if z != null { *z = 0xCC; }
+
+    ar.reset();
+    io::print("Arena after reset: used=", ar.used());
+    free(ar_buf);
+
+    // -- Pool<int> ------------------------------------------------------
+    set::int[ptr]  pool_slab = alloc(int, POOL_CAP);
+    set::Pool<int> pool;
+    pool.init(pool_slab);
+
+    // Acquire 8 slots and store values
+    const::uint N = 8;
+    arr::uint|8| handles;
+
+    for i in 0..<N {
+        handles[i] = pool.acquire() catch err { show_err(err); 0 };
+    }
+
+    // Write phase
+    for i in 0..<N {
+        set::int[ptr] p = pool.get(handles[i]) catch err { show_err(err); continue; };
+        *p = cast(int, i) * 100;
+    }
+
+    // Read phase
+    for i in 0..<N {
+        set::int[ptr] p = pool.get(handles[i]) catch err { show_err(err); continue; };
+        io::print("pool[", handles[i], "] = ", *p);
+    }
+
+    // Release all -- uses nested labels to show label syntax
+    outer: for i in 0..<N {
+        set::uint slot = handles[i];
+        pool.release(slot) catch err {
+            show_err(err);
+            continue outer;
+        };
+    }
+
+    io::print("Pool live slots after release: ", pool.count());
+    free(pool_slab);
+
+    // -- ilog2 / alignment demo -----------------------------------------
+    arr::uint|6| sizes = (1, 4, 16, 64, 256, 1_024);
+    for i in 0..<6 {
+        set::uint s = sizes[i];
+        io::print("align_up(", s, ", 8)=", align_up(s, 8),
+                  "  ilog2=", ilog2(s));
+    }
+
+    // Null coalescing: use a fallback value when allocation fails
+    set::int[ptr] tiny_buf = alloc(int, 32);
+    set::Arena    tiny_ar;
+    tiny_ar.init(tiny_buf, 32);
+
+    set::int[ptr][opt] big = tiny_ar.push(512, 8) catch err { null };
+    set::uint used_or_zero = if big != null { tiny_ar.used() } else { 0 };
+    io::print("tiny arena push result (expected 0): ", used_or_zero);
+
+    tiny_ar.reset();
+    free(tiny_buf);
+
+    io::print("All done.");
+    return 0;
+}
