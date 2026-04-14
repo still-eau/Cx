@@ -134,6 +134,7 @@ class TK(Enum):
     LSHIFT       = auto()   # <<
     RSHIFT       = auto()   # >>
     RSHIFT_LOGIC = auto()   # >>>  (unsigned right shift)
+    RSHIFT_LOGIC_EQ = auto() # >>>=
 
     # Nullable / optional operators
     QUEST_QUEST = auto()   # ??  (null coalescing)
@@ -541,6 +542,13 @@ class Lexer:
         a = self._peek(0)
         b = self._peek(1)
         c = self._peek(2)
+
+        d = self._peek(3)
+
+        # --- Four-character tokens ---
+        if a == ">" and b == ">" and c == ">" and d == "=":
+            self._advance(); self._advance(); self._advance(); self._advance()
+            return self._make(TK.RSHIFT_LOGIC_EQ, ">>>=", line, col)
 
         # --- Three-character tokens (must be checked before two-char) ---
 

@@ -82,7 +82,7 @@ set::int hi = flags << 4;
 set::int lo = flags >> 4;
 ```
 
-Assignation : `&=`  `|=`  `^=`  `<<=`  `>>=`
+Assignation : `&=`  `|=`  `^=`  `<<=`  `>>>=`
 
 > `_` dans les literaux numeriques sert de separateur visuel :
 > `1_000_000`, `0xFF_AA_BB_CC`, `0b0000_1010`
@@ -128,4 +128,4 @@ set::str[opt]    n = p?.name;    // null if p is null
 | 11     | `&&` |
 | 12     | `\|\|` |
 | 13     | `??` |
-| 14     | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` |
+| 14     | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>>=` |

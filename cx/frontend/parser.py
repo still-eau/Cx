@@ -268,31 +268,35 @@ class Parser:
 
     def _parse_item(self) -> Optional[Item]:
         loc    = self._loc()
-        is_pub = bool(self._match(TK.PUB))
+        is_pub = False
 
         # attribute list before the declaration
         attrs:      List[str]     = []
         extern_sym: Optional[str] = None
-        while self._check(TK.AT_INLINE, TK.AT_NORETURN, TK.AT_EXTERN,
-                          TK.AT_UNSAFE, TK.AT_WHEN):
-            tok = self._advance()
-            if tok.kind is TK.AT_INLINE:
-                attrs.append("inline")
-            elif tok.kind is TK.AT_NORETURN:
-                attrs.append("noreturn")
-            elif tok.kind is TK.AT_UNSAFE:
-                attrs.append("unsafe")
-            elif tok.kind is TK.AT_EXTERN:
-                self._expect(TK.LPAREN)
-                extern_sym = self._expect(TK.STRING).value
-                self._expect(TK.RPAREN)
-                attrs.append("extern")
-            elif tok.kind is TK.AT_WHEN:
-                # @when at item level = conditional item
-                cond = self._parse_when_cond()
-                body_items = self._parse_brace_items()
-                # Wrap as a pseudo item — skip for now, just return first
-                return None
+        
+        while True:
+            if self._match(TK.PUB):
+                is_pub = True
+            elif self._check(TK.AT_INLINE, TK.AT_NORETURN, TK.AT_EXTERN,
+                             TK.AT_UNSAFE, TK.AT_WHEN):
+                tok = self._advance()
+                if tok.kind is TK.AT_INLINE:
+                    attrs.append("inline")
+                elif tok.kind is TK.AT_NORETURN:
+                    attrs.append("noreturn")
+                elif tok.kind is TK.AT_UNSAFE:
+                    attrs.append("unsafe")
+                elif tok.kind is TK.AT_EXTERN:
+                    self._expect(TK.LPAREN)
+                    extern_sym = self._expect(TK.STRING).value
+                    self._expect(TK.RPAREN)
+                    attrs.append("extern")
+                elif tok.kind is TK.AT_WHEN:
+                    cond = self._parse_when_cond()
+                    body_items = self._parse_brace_items()
+                    return None
+            else:
+                break
 
         if self._check(TK.FUNC):
             return self._parse_func(loc, is_pub, attrs, extern_sym)
@@ -424,9 +428,29 @@ class Parser:
         fields:  List[FieldDecl] = []
         methods: List[FuncDecl]  = []
         while not self._check(TK.RBRACE, TK.EOF):
-            fld_pub = bool(self._match(TK.PUB))
+            loc_f = self._loc()
+            fld_pub = False
+            attrs = []
+            extern_sym = None
+
+            while True:
+                if self._match(TK.PUB):
+                    fld_pub = True
+                elif self._check(TK.AT_INLINE, TK.AT_NORETURN, TK.AT_EXTERN, TK.AT_UNSAFE):
+                    tok = self._advance()
+                    if tok.kind is TK.AT_INLINE: attrs.append("inline")
+                    elif tok.kind is TK.AT_NORETURN: attrs.append("noreturn")
+                    elif tok.kind is TK.AT_UNSAFE: attrs.append("unsafe")
+                    elif tok.kind is TK.AT_EXTERN:
+                        self._expect(TK.LPAREN)
+                        extern_sym = self._expect(TK.STRING).value
+                        self._expect(TK.RPAREN)
+                        attrs.append("extern")
+                else:
+                    break
+
             if self._check(TK.FUNC):
-                m = self._parse_func(self._loc(), fld_pub, [], None)
+                m = self._parse_func(loc_f, fld_pub, attrs, extern_sym)
                 methods.append(m)
             else:
                 f = self._parse_field_decl(fld_pub)
