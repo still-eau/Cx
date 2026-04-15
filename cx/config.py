@@ -26,11 +26,18 @@ class EmitKind(Enum):
 
 def _default_target() -> str:
     m = platform.machine().lower()
+    arch = "x86_64"
     if m in ("amd64", "x86_64"):
-        return "x86_64"
-    if m in ("arm64", "aarch64"):
-        return "aarch64"
-    return "x86_64"
+        arch = "x86_64"
+    elif m in ("arm64", "aarch64"):
+        arch = "aarch64"
+    
+    system = platform.system().lower()
+    if system == "windows":
+        return f"{arch}-pc-windows-msvc"
+    if system == "darwin":
+        return f"{arch}-apple-darwin"
+    return f"{arch}-unknown-linux-gnu"
 
 
 @dataclass

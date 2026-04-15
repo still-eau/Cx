@@ -44,6 +44,7 @@ class TK(Enum):
     BREAK    = auto()
     CONTINUE = auto()
     RETURN   = auto()
+    NEW      = auto()
 
     # Error handling keywords
     FAIL  = auto()
@@ -183,6 +184,7 @@ _KEYWORDS: dict[str, TK] = {
     "if": TK.IF,         "else": TK.ELSE,      "for": TK.FOR,
     "in": TK.IN,         "match": TK.MATCH,    "break": TK.BREAK,
     "continue": TK.CONTINUE,                   "return": TK.RETURN,
+    "new": TK.NEW,
     "fail": TK.FAIL,     "try": TK.TRY,        "catch": TK.CATCH,
     "where": TK.WHERE,
     "true": TK.TRUE,     "false": TK.FALSE,    "null": TK.NULL,

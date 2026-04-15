@@ -100,17 +100,34 @@ class IRBuilder:
     def _build_item(self, item: Item) -> None:
         if isinstance(item, FuncDecl):
             self._build_func(item)
+        elif isinstance(item, ObjDecl):
+            for method in item.methods:
+                self._build_func(method, parent_obj=item)
         elif isinstance(item, VarDecl):
             # Globals (simplified, usually need a global init pass)
             pass
 
-    def _build_func(self, fn: FuncDecl) -> None:
+    def _build_func(self, fn: FuncDecl, parent_obj: Optional[ObjDecl] = None) -> None:
         # Skip generic functions (must be instantiated first)
         if fn.type_params:
             return
 
         name = fn.extern_sym if fn.extern_sym else fn.name
+        if parent_obj:
+            name = f"{parent_obj.name}_{name}"
+
         params = [(p.name, getattr(p.type_node, 'resolved_type', I32)) for p in fn.params]
+        if parent_obj:
+            # Inject 'self' as first parameter with full object type (crucial for GEP)
+            f_infos = []
+            for fd in parent_obj.fields:
+                f_ty = getattr(fd.type_node, 'resolved_type', VOID)
+                f_infos.append((fd.name, f_ty))
+            
+            self_obj_ty = ObjCxType(parent_obj.name, f_infos)
+            self_ty = PtrCxType(self_obj_ty)
+            params.insert(0, ("self", self_ty))
+
         ret_type = getattr(fn.ret_type, 'resolved_type', VOID)
         
         ir_fn = IRFunction(
@@ -150,14 +167,19 @@ class IRBuilder:
         
         # Add implicit return if block wasn't terminated
         if self._block and self._block.terminator is None:
-            if self._fn.name == "main" and isinstance(self._fn.ret_type, PrimCxType) and self._fn.ret_type.is_integer():
+            if not self._block.instrs and "dead" in self._block.label:
+                self._block.terminate(IRUnreachable())
+            elif self._fn.name == "main" and isinstance(self._fn.ret_type, PrimCxType) and self._fn.ret_type.is_integer():
                 # main() returns 0 by default
                 zero_val = 0
                 zero = self._next_reg(self._fn.ret_type)
                 self._block.emit(IRConst(dest=zero.name, value=zero_val, type=self._fn.ret_type))
                 self._block.terminate(IRRet(zero))
-            else:
+            elif self._fn.ret_type == VOID:
                 self._block.terminate(IRRet(None))
+            else:
+                # Missing return in non-void function
+                self._block.terminate(IRUnreachable())
             
         self._fn = None
         self._block = None
@@ -493,11 +515,52 @@ class IRBuilder:
                 res = self._next_reg(expr.resolved_type)
                 callee = expr.callee.name
                 if callee == "print":
-                    callee = "__cx_print_str"
+                    # Choose runtime print function based on argument type
+                    if args:
+                        arg_ty = args[0].type
+                        if isinstance(arg_ty, PrimCxType) and arg_ty.name == "str":
+                            callee = "__cx_print_str"
+                        elif isinstance(arg_ty, PrimCxType) and arg_ty.is_integer():
+                            callee = "__cx_print_int"
+                        else:
+                            callee = "__cx_print_str"
+                    else:
+                        callee = "__cx_print_str"
                 
                 self._block.emit(IRCall(dest=res.name if expr.resolved_type != VOID else None, 
                                         callee=callee, args=args, ret_ty=expr.resolved_type))
                 return res if expr.resolved_type != VOID else UNDEF
+            
+            elif isinstance(expr.callee, PathExpr):
+                args = [self._build_expr(a) for a in expr.args]
+                res = self._next_reg(expr.resolved_type)
+                callee = "::".join(expr.callee.parts)
+                self._block.emit(IRCall(dest=res.name if expr.resolved_type != VOID else None, 
+                                        callee=callee, args=args, ret_ty=expr.resolved_type))
+                return res if expr.resolved_type != VOID else UNDEF
+
+        if isinstance(expr, MethodCallExpr):
+            receiver = self._build_expr(expr.receiver)
+            args = [receiver] + [self._build_expr(a) for a in expr.args]
+            
+            res = self._next_reg(expr.resolved_type)
+            
+            # Resolve callee name (manglied Class_Method)
+            recv_ty = expr.receiver.resolved_type
+            if isinstance(recv_ty, PtrCxType):
+                recv_ty = recv_ty.pointee
+                
+            if isinstance(recv_ty, (ObjCxType, NamedType)):
+                callee = f"{recv_ty.name}_{expr.method}"
+            else:
+                callee = expr.method # Fallback
+                
+            self._block.emit(IRCall(dest=res.name if expr.resolved_type != VOID else None, 
+                                    callee=callee, args=args, ret_ty=expr.resolved_type))
+            return res if expr.resolved_type != VOID else UNDEF
+
+        if isinstance(expr, NewExpr):
+            return self._build_new_expr(expr)
             
         if isinstance(expr, NullLit):
             res = self._next_reg(NULL)
@@ -647,8 +710,28 @@ class IRBuilder:
             self._block.emit(IRCall(dest=None, callee="__cx_free", args=[ptr], ret_ty=VOID))
             return VOID
 
-        # Simplified implementations return UNDEF for unhandled nodes
         return UNDEF
+
+    def _build_new_expr(self, expr: NewExpr) -> IRValue:
+        # 1. Allocate memory (always 1 for 'new')
+        res = self._next_reg(expr.resolved_type)
+        obj_ty = expr.resolved_type.pointee
+        
+        # Calculate size based on the resolved type
+        total_size = self._get_type_size(obj_ty)
+        sz_reg = self._next_reg(I32)
+        self._block.emit(IRConst(dest=sz_reg.name, value=total_size, type=I32))
+        
+        # Call malloc
+        self._block.emit(IRCall(dest=res.name, callee="__cx_malloc", args=[sz_reg], ret_ty=expr.resolved_type))
+        
+        # 2. Call 'init' if it exists
+        if isinstance(obj_ty, ObjCxType) and "init" in obj_ty.methods:
+            callee = f"{obj_ty.name}_init"
+            args = [res] + [self._build_expr(a) for a in expr.args]
+            self._block.emit(IRCall(dest=None, callee=callee, args=args, ret_ty=VOID))
+            
+        return res
 
     def _get_lvalue_ptr(self, expr: Expr) -> IRValue:
         """Factor out getting the pointer to an expression (for assignment/addr-of)."""
@@ -695,6 +778,8 @@ class IRBuilder:
         return UNDEF
     def _sizeof(self, ty_node: TypeNode) -> int:
         """Calculate the size of a type in bytes (simplified for common types)."""
+        # Ideally we'd resolve the TypeNode to a CxType first.
+        # This is a legacy helper; _get_type_size is preferred.
         if isinstance(ty_node, PrimType):
             if ty_node.name in ("int", "uint", "flt"): return 8
             if ty_node.name in ("dbl"):                 return 8
@@ -704,9 +789,18 @@ class IRBuilder:
             return 8
         if isinstance(ty_node, ModifiedType):
             if "ptr" in ty_node.modifiers:              return 8
-        # For objects/structs we'd need to look up the definition. 
-        # For now assume 32 bytes as a safe buffer for Node if we can't find it.
-        # Ideally we'd query the TypeChecker or define a proper size pass.
-        if isinstance(ty_node, NamedType) and ty_node.name == "Node":
-            return 16 # {ptr, int} -> 8 + 8
         return 8 # Fallback
+
+    def _get_type_size(self, ty: CxType) -> int:
+        """Calculates size of a resolved CxType in bytes."""
+        if isinstance(ty, PrimCxType):
+            if ty.name == "str": return 16
+            if ty.bits == 0: return 1 # void
+            return (ty.bits + 7) // 8
+        if isinstance(ty, PtrCxType):
+            return 8
+        if isinstance(ty, ObjCxType):
+            return sum(self._get_type_size(f_ty) for _, f_ty in ty.fields)
+        if isinstance(ty, ArrCxType):
+            return ty.capacity * self._get_type_size(ty.elem)
+        return 8

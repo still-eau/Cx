@@ -494,6 +494,13 @@ class AllocExpr(Expr):
 
 
 @dataclass
+class NewExpr(Expr):
+    """new Type(args...)"""
+    type_node: TypeNode
+    args:      List[Expr]
+
+
+@dataclass
 class FreeExpr(Expr):
     ptr: Expr
 

@@ -30,7 +30,7 @@ class Diagnostic:
     level:   str              # "error" | "warning" | "note" | "hint"
     message: str
     loc:     Optional[Loc] = None
-    source:  Optional[str] = None   # full source text (for snippets)
+    source_cache: dict[str, str] = field(default_factory=dict)
     hint:    Optional[str] = None
     note:    Optional[str] = None
 
@@ -43,38 +43,32 @@ class Diagnostic:
             "note":    "bold cyan",
             "hint":    "bold green",
         }
-        color   = _COLORS.get(self.level, "bold white")
+        color = _COLORS.get(self.level, "bold white")
         
         # 1. Message
         _console.print(f"[{color}]{self.level}[/{color}]: [bold]{self.message}[/bold]")
 
-        # 2. Source code snippet (rustc-style)
-        if self.source and self.loc and getattr(self.loc, 'line', 0) > 0:
-            lines = self.source.splitlines()
+        # 2. Source code snippet
+        if self.loc and self.loc.file in self.source_cache and self.loc.line > 0:
+            source = self.source_cache[self.loc.file]
+            lines = source.splitlines()
             lineno = self.loc.line
             if 1 <= lineno <= len(lines):
                 raw_line = lines[lineno - 1]
-                # Replace tabs with spaces to preserve alignment
                 raw_line = raw_line.replace('\t', '    ') 
                 
                 col = max(1, self.loc.col)
                 length = getattr(self.loc, 'length', 1)
                 
-                # Use a minimum padding for the gutter
                 gutter = f"{lineno}"
                 padding = max(2, len(gutter))
                 
-                # Header
                 _console.print(f" {' ' * padding}[dim]╭─[[/dim]{self.loc.file}:{lineno}:{col}[dim]][/dim]")
                 _console.print(f" {' ' * padding}[dim]│[/dim]")
-                
-                # Line of code
                 _console.print(f" [bold blue]{gutter:>{padding}}[/bold blue] [dim]│[/dim] {raw_line}")
                 
-                # Underline
                 underline_pad = " " * (col - 1)
                 underline_chars = "^" * length
-                # Add the caption after the underline
                 caption_str = f" {self.message}"
                 _console.print(f" {' ' * padding}[dim]│[/dim] {underline_pad}[bold {color}]{underline_chars}{caption_str}[/bold {color}]")
                 _console.print(f" {' ' * padding}[dim]╰────[/dim]")
@@ -94,15 +88,21 @@ class Diagnostic:
 # ---------------------------------------------------------------------------
 
 class ErrorReporter:
-    """Accumulates all diagnostics for a single source file."""
+    """Accumulates diagnostics across multiple source files."""
 
-    __slots__ = ("_filename", "_source", "_errors", "_warnings")
+    __slots__ = ("_main_file", "_sources", "_errors", "_warnings")
 
-    def __init__(self, filename: str, source: Optional[str] = None) -> None:
-        self._filename = filename
-        self._source   = source
+    def __init__(self, main_file: str, source: Optional[str] = None) -> None:
+        self._main_file = main_file
+        self._sources: dict[str, str] = {}
+        if source:
+            self._sources[main_file] = source
         self._errors:   List[Diagnostic] = []
         self._warnings: List[Diagnostic] = []
+
+    def add_source(self, filename: str, content: str) -> None:
+        """Register source code for a file to enable snippet rendering."""
+        self._sources[filename] = content
 
     # -- emit -----------------------------------------------------------------
 
@@ -113,7 +113,7 @@ class ErrorReporter:
         hint: Optional[str] = None,
         note: Optional[str] = None,
     ) -> None:
-        d = Diagnostic("error", msg, loc, self._source, hint, note)
+        d = Diagnostic("error", msg, loc, self._sources, hint, note)
         self._errors.append(d)
         d.render()
 
@@ -156,7 +156,7 @@ class ErrorReporter:
         w_part = f", {w} warning(s)" if w else ""
         _console.print(
             f"\n[bold red]aborting: {n} error(s){w_part} in "
-            f"[underline]{self._filename}[/underline][/bold red]"
+            f"[underline]{self._main_file}[/underline][/bold red]"
         )
         sys.exit(1)
 

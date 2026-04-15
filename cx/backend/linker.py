@@ -22,47 +22,62 @@ class RelocatableLinker:
         self.cc = self._find_cc()
 
     def _find_cc(self) -> str:
-        # Prefer clang, fallback to gcc
-        for cc in ("clang", "gcc", "ld"):
+        # Prefer clang, fallback to gcc/cc/ld
+        candidates = ["clang", "gcc", "cc", "ld"]
+        if os.name == "nt":
+            candidates.insert(0, "clang.exe")
+            candidates.extend(["gcc.exe", "lld-link.exe"])
+            
+        for cc in candidates:
             try:
                 # Just check if it's in PATH
-                subprocess.run([cc, "--version"], capture_output=True, check=True)
+                subprocess.run([cc, "--version" if "link" not in cc else "/?"], 
+                               capture_output=True, check=True, text=True, shell=(os.name == 'nt'))
                 return cc
             except (subprocess.CalledProcessError, FileNotFoundError):
                 continue
-        raise CxError("System CC (clang/gcc) not found in PATH for linking.")
+        raise CxError("System Linker (clang/gcc) not found in PATH for linking. Please install LLVM or GCC.")
 
-    def link(self, input_obj: str, output_exe: str) -> None:
+    def link(self, input_objs: List[str], output_exe: str) -> None:
+        """Links multiple object files into a single executable."""
         self.logger.phase("link", f"using {self.cc}")
         
-        args: List[str] = [self.cc, input_obj, "-o", output_exe]
+        args: List[str] = [self.cc]
+        args.extend(input_objs)
+        args.extend(["-o", output_exe])
         
-        # Library linking
+        # OS-specific library linking
         if os.name == 'nt':
-            # On Windows, we need kernel32 for basic OS functions
+            # On Windows, we need standard system libs for Win32 API calls (kernel32, user32)
+            # We also explicitly tell clang to use the msvc environment if possible
             args.extend(["-lkernel32", "-luser32"])
+            if "clang" in self.cc:
+                # Helps finding MSVC libs if they are in standard paths
+                args.append("-Xlinker")
+                args.append("/subsystem:console")
         else:
-            # Adding m for math library on Linux/mac
-            args.append("-lm")
+            # On Linux/Posix, we need libc and libm
+            # -no-pie is often needed for simple binaries depending on the distro
+            args.extend(["-lc", "-lm", "-no-pie"])
+
         try:
-            res = subprocess.run(args, capture_output=True, check=True)
+            res = subprocess.run(args, capture_output=True, check=True, text=True)
             if res.stderr and self.opts.verbose:
-                self.logger.info(res.stderr.decode("utf-8", errors="replace"))
+                self.logger.info(res.stderr)
         except subprocess.CalledProcessError as e:
             self.logger.warn(f"Linker failed with code {e.returncode}")
-            err_msg = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+            err_msg = e.stderr if e.stderr else ""
             
-            # Gestion amicale de l'erreur classique sous Windows (LLVM standalone vs MSVC)
+            # Special handling for Windows linking errors (common in standard LLVM installs)
             if os.name == 'nt' and ("msvc-not-found" in err_msg or "program not executable" in err_msg):
                 raise CxError(
-                    "Impossible de lier l'exécutable sous Windows.\n\n"
-                    "Explication :\n"
-                    "Bien que Clang soit installé, LLVM sur Windows ne fournit pas la bibliothèque standard C (libc) "
-                    "ni les outils de linkage de base. Clang a besoin du SDK Windows et des librairies Microsoft.\n\n"
-                    "Solution :\n"
-                    "Installez 'Visual Studio Build Tools' (la charge de travail 'Développement Desktop en C++'),\n"
-                    "OU installez MinGW-w64 via MSYS2 et utilisez GCC.\n\n"
-                    f"Détail technique (Clang):\n{err_msg.strip()}"
+                    "Linker Error: Cannot link the executable on Windows.\n\n"
+                    "Background:\n"
+                    "Clang on Windows requires the Microsoft Visual C++ (MSVC) runtime and SDK libraries "
+                    "to produce functional executables.\n\n"
+                    "Solution:\n"
+                    "- Install 'Visual Studio Build Tools' (Desktop development with C++)\n"
+                    "- OR use MinGW-w64/GCC as an alternative linker."
                 )
             
             raise CxError(f"Linking error:\n{err_msg}")

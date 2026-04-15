@@ -1050,6 +1050,17 @@ class Parser:
         loc = self._loc()
 
         # try expr
+        if self._check(TK.NEW):
+            self._advance()
+            ty = self._parse_type()
+            self._expect(TK.LPAREN)
+            args = []
+            while not self._check(TK.RPAREN, TK.EOF):
+                args.append(self._parse_expr())
+                self._match(TK.COMMA)
+            self._expect(TK.RPAREN)
+            return NewExpr(loc, ty, args)
+
         if self._check(TK.TRY):
             self._advance()
             inner = self._parse_cast_or_unary()

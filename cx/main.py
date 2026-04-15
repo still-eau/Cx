@@ -1,4 +1,4 @@
-"""Cx compiler CLI entry point.
+"""Cx Compiler CLI entry point.
 
 Orchestrates the entire compilation pipeline:
 Lex -> Parse -> Semantic Check -> AST Opt -> IR Gen -> LLVM Opt -> Link
@@ -11,13 +11,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import typer
 from rich.console import Console
 
-# On insère le dossier parent dans le sys.path explicitemment
-# pour éviter les erreurs d'import quand la CLI est lancée comme exécutable gelé.
+# Ensure we can find the 'cx' package regardless of how we are called.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cx.config import CompileOptions, OptLevel, EmitKind
@@ -30,125 +29,142 @@ from cx.middleend.optimizer.pass_manager import build_pipeline
 from cx.middleend.ir.builder import IRBuilder
 from cx.backend.llvm_codegen import LLVMCodegen
 from cx.backend.linker import RelocatableLinker
+from cx.backend import runtime
 
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
 
-app = typer.Typer(
-    name="cx",
-    help="Cx Programming Language Compiler (LLVM backend)",
-    no_args_is_help=True,
-    add_completion=False,
-)
-
+app     = typer.Typer(name="cx", help="Cx Programming Language Compiler", no_args_is_help=True)
 console = Console(stderr=True)
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Compile Session
 # ---------------------------------------------------------------------------
 
-def _run_pipeline(opts: CompileOptions, logger: CompileLogger, check_only: bool = False, ast_only: bool = False) -> None:
-    # 0. Read file
-    if not os.path.exists(opts.source_file):
-        console.print(f"[bold red]error[/bold red]: file not found: {opts.source_file}")
-        sys.exit(1)
-        
-    with open(opts.source_file, "r", encoding="utf-8") as f:
-        source_code = f.read()
-        
-    reporter = ErrorReporter(opts.source_file, source_code)
-    
-    try:
-        # 1. Lex
-        logger.phase("lex")
-        lexer = Lexer(source_code)
-        tokens = lexer.tokenize()
-        
-        # 2. Parse
-        logger.phase("parse")
-        parser = Parser(tokens, opts.source_file, source_code, reporter=reporter)
-        program = parser.parse()
-        reporter.abort_if_errors()
+class CompileSession:
+    """Orchestrates the lifecycle of a compilation task with robust resource management."""
 
-        if ast_only:
-            from rich.pretty import pprint
-            pprint(program)
-            logger.done("AST dumped.")
-            return
-        
-        # 3. Semantic Analysis
-        logger.phase("check")
-        checker = TypeChecker(reporter)
-        checker.check(program)
-        reporter.abort_if_errors()
+    def __init__(self, opts: CompileOptions, logger: CompileLogger):
+        self.opts     = opts
+        self.logger   = logger
+        self.reporter = None
 
-        if check_only:
-            logger.done("Syntax and types are correct.")
-            return
-        
-        # 4. AST Optimization
-        logger.phase("opt")
-        pm = build_pipeline(opts.llvm_opt, logger)
-        pm.run(program)
-        
-        # 5. HIR Generation
-        logger.phase("hir")
-        ir_builder = IRBuilder(name=Path(opts.source_file).stem)
-        hir_mod = ir_builder.build(program)
-        
-        # 6. LLVM Codegen & Optimization
-        logger.phase("codegen", f"level O{opts.llvm_opt}")
-        codegen = LLVMCodegen(opts, module_name=Path(opts.source_file).stem)
-        llvm_ir_str = codegen.lower(hir_mod)
-
-        out_ext = opts.derived_output()
-
-        if opts.emit == EmitKind.IR:
-            dst = out_ext + ".ll"
-            with open(dst, "w", encoding="utf-8") as f:
-                f.write(llvm_ir_str)
-            logger.done(dst)
-            return
-
-        if opts.emit == EmitKind.ASM:
-            dst = out_ext + ".s"
-            codegen.emit_asm(llvm_ir_str, dst)
-            logger.done(dst)
-            return
-            
-        # Emit object file (temporary if building executable)
-        obj_file = out_ext + ".o" if opts.emit == EmitKind.OBJ else tempfile.mktemp(suffix=".o")
-        codegen.emit_object(llvm_ir_str, obj_file)
-        
-        if opts.emit == EmitKind.OBJ:
-            logger.done(obj_file)
-            return
-            
-        # 7. Link to executable
-        linker = RelocatableLinker(opts, logger)
-        exe_file = out_ext + (".exe" if os.name == "nt" else "")
-        linker.link(obj_file, exe_file)
-        
-        # Cleanup temp obj
-        if os.path.exists(obj_file):
-            os.remove(obj_file)
-
-        logger.done(exe_file)
-        
-        # 8. Run generated binary
-        if opts.run_after:
-            console.print(f"[dim]Running {exe_file}...[/dim]\n")
-            os.system(os.path.abspath(exe_file))
-            
-    except CxError as e:
-        if e.loc:
-            reporter.error(str(e), e.loc)
-            reporter.abort_if_errors()
-        else:
-            console.print(f"[bold red]Compiler Error[/bold red]: {e}")
+    def run(self, check_only: bool = False, ast_only: bool = False) -> None:
+        """Executes the compilation pipeline."""
+        src_path = Path(self.opts.source_file)
+        if not src_path.exists():
+            console.print(f"[bold red]error[/bold red]: file not found: {src_path}")
             sys.exit(1)
+
+        source_code = src_path.read_text(encoding="utf-8")
+        self.reporter = ErrorReporter(str(src_path), source_code)
+
+        try:
+            # 1. Frontend: Lexing & Parsing
+            self.logger.phase("parse")
+            lexer  = Lexer(source_code)
+            parser = Parser(lexer.tokenize(), str(src_path), source_code, reporter=self.reporter)
+            program = parser.parse()
+            self.reporter.abort_if_errors()
+
+            if ast_only:
+                from rich.pretty import pprint
+                pprint(program)
+                return
+
+            # 2. Middle-end: Semantic Analysis
+            self.logger.phase("check")
+            checker = TypeChecker(self.reporter)
+            checker.check(program)
+            self.reporter.abort_if_errors()
+
+            if check_only:
+                self.logger.done("Syntax and types are correct.")
+                return
+
+            # 3. Middle-end: Optimization & IR Generation
+            self.logger.phase("opt")
+            pm = build_pipeline(self.opts.llvm_opt, self.logger)
+            pm.run(program)
+
+            self.logger.phase("hir")
+            ir_builder = IRBuilder(name=src_path.stem)
+            hir_mod    = ir_builder.build(program)
+
+            # 4. Backend: LLVM Codegen
+            self.logger.phase("codegen", f"O{self.opts.llvm_opt}")
+            codegen = LLVMCodegen(self.opts, module_name=src_path.stem)
+            llvm_ir = codegen.lower(hir_mod)
+
+            # 5. Output Emission
+            self._emit_output(codegen, llvm_ir)
+
+        except CxError as e:
+            if e.loc:
+                self.reporter.error(str(e), e.loc)
+                self.reporter.abort_if_errors()
+            else:
+                console.print(f"[bold red]Compiler Error[/bold red]: {e}")
+                sys.exit(1)
+
+    def _emit_output(self, codegen: LLVMCodegen, llvm_ir: str) -> None:
+        """Handles the final emission of IR, ASM, OBJ, or EXE."""
+        out_base = self.opts.derived_output()
+
+        # Handle text-based emissions
+        if self.opts.emit == EmitKind.IR:
+            dst = out_base + ".ll"
+            Path(dst).write_text(llvm_ir, encoding="utf-8")
+            self.logger.done(dst)
+            return
+
+        if self.opts.emit == EmitKind.ASM:
+            dst = out_base + ".s"
+            codegen.emit_asm(llvm_ir, dst)
+            self.logger.done(dst)
+            return
+
+        # Handle binary emissions via object files
+        with tempfile.TemporaryDirectory(prefix="cx_build_") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            
+            # 1. Compile User Code to Object
+            user_obj = tmp_path / "user.o"
+            codegen.emit_object(llvm_ir, str(user_obj))
+
+            if self.opts.emit == EmitKind.OBJ:
+                final_obj = out_base + ".o"
+                import shutil
+                shutil.copy(user_obj, final_obj)
+                self.logger.done(final_obj)
+                return
+
+            # 2. Compile Modular Runtime to Object
+            self.logger.phase("runtime", "building modular standard library")
+            os_name = "nt" if os.name == "nt" else "posix"
+            rt_mod = runtime.get_runtime_module(codegen.module.triple, codegen.module.data_layout, os_name=os_name)
+            rt_obj = tmp_path / "runtime.o"
+            codegen.emit_object(str(rt_mod), str(rt_obj))
+
+            # 3. Link Executable
+            exe_file = out_base + (".exe" if os.name == "nt" else "")
+            linker = RelocatableLinker(self.opts, self.logger)
+            linker.link([str(user_obj), str(rt_obj)], exe_file)
+            
+            self.logger.done(exe_file)
+
+            if self.opts.run_after:
+                self._run_binary(exe_file)
+
+    def _run_binary(self, path: str) -> None:
+        """Executes the produced binary."""
+        full_path = str(Path(path).absolute())
+        console.print(f"[dim]Executing {path}...[/dim]\n")
+        # Use subprocess.call to ensure it waits for the process to finish
+        import subprocess
+        subprocess.call([full_path])
 
 
 # ---------------------------------------------------------------------------
@@ -158,12 +174,12 @@ def _run_pipeline(opts: CompileOptions, logger: CompileLogger, check_only: bool 
 @app.command()
 def build(
     source_file: str = typer.Argument(..., help="Main .cx file to compile"),
-    output: str      = typer.Option("", "-o", "--output", help="Output file name"),
-    opt_level: str   = typer.Option("O2", "-O", help="Optimization level (O0, O1, O2, O3, Os)"),
+    output: str      = typer.Option("", "-o", "--output", help="Output filename"),
+    opt_level: str   = typer.Option("O2", "-O", help="Opt level (O0, O1, O2, O3, Os)"),
     emit: str        = typer.Option("exe", "--emit", help="Emit kind: exe, obj, asm, ir"),
     verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show timings and phase info"),
 ) -> None:
-    """Compile a Cx source file."""
+    """Compile a Cx source file into an executable or intermediate format."""
     opts = CompileOptions(
         source_file=source_file,
         output=output,
@@ -171,15 +187,14 @@ def build(
         emit=EmitKind(emit.lower()),
         verbose=verbose,
     )
-    logger = CompileLogger(verbose)
-    _run_pipeline(opts, logger)
-
+    Session = CompileSession(opts, CompileLogger(verbose))
+    Session.run()
 
 @app.command()
 def run(
-    source_file: str = typer.Argument(..., help="Main .cx file to compile and run"),
+    source_file: str = typer.Argument(..., help="Source file to compile and run"),
     opt_level: str   = typer.Option("O2", "-O", help="Optimization level"),
-    verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show compilation phases"),
+    verbose: bool    = typer.Option(False, "-v", "--verbose"),
 ) -> None:
     """Compile and immediately execute a Cx source file."""
     opts = CompileOptions(
@@ -189,76 +204,35 @@ def run(
         verbose=verbose,
         run_after=True,
     )
-    logger = CompileLogger(verbose)
-    _run_pipeline(opts, logger)
-
-
-@app.command()
-def check(
-    source_file: str = typer.Argument(..., help="Main .cx file to check (no codegen)"),
-    verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show phases info"),
-) -> None:
-    """Check a Cx source file for errors without compiling it."""
-    opts = CompileOptions(
-        source_file=source_file,
-        emit=EmitKind.IR, # dummy
-        verbose=verbose,
-    )
-    logger = CompileLogger(verbose)
-    _run_pipeline(opts, logger, check_only=True)
-
+    Session = CompileSession(opts, CompileLogger(verbose))
+    Session.run()
 
 @app.command()
-def ast(
-    source_file: str = typer.Argument(..., help="Main .cx file to dump AST for"),
-    verbose: bool    = typer.Option(False, "-v", "--verbose", help="Show phases info"),
-) -> None:
-    """Parse a Cx source file and print its Abstract Syntax Tree."""
-    opts = CompileOptions(
-        source_file=source_file,
-        emit=EmitKind.IR, # dummy
-        verbose=verbose,
-    )
-    logger = CompileLogger(verbose)
-    _run_pipeline(opts, logger, ast_only=True)
-
+def check(source_file: str = typer.Argument(...), verbose: bool = typer.Option(False, "-v")) -> None:
+    """Check a source file for errors without code generation."""
+    opts = CompileOptions(source_file=source_file, verbose=verbose)
+    Session = CompileSession(opts, CompileLogger(verbose))
+    Session.run(check_only=True)
 
 @app.command()
 def version() -> None:
     """Print the compiler version."""
-    try:
-        from cx.__version__ import __version__
-    except ImportError:
-        __version__ = "unknown"
+    from cx.__version__ import __version__
     console.print(f"Cx Compiler [bold cyan]v{__version__}[/bold cyan]")
 
-
 @app.command()
-def init(
-    name: str = typer.Argument(..., help="Name of the project to initialize"),
-) -> None:
-    """Initialize a new Cx project directory with a default template."""
+def init(name: str = typer.Argument(..., help="New project name")) -> None:
+    """Initialize a new Cx project template."""
     project_dir = Path(name)
     if project_dir.exists():
         console.print(f"[bold red]error[/bold red]: directory '{name}' already exists.")
         sys.exit(1)
         
-    try:
-        project_dir.mkdir()
-        src_dir = project_dir / "src"
-        src_dir.mkdir()
-        
-        main_file = src_dir / "main.cx"
-        main_file.write_text('// The entry point to your program\nfunc main() {\n    // Your code here\n}\n', encoding="utf-8")
-        
-        gitignore = project_dir / ".gitignore"
-        gitignore.write_text("/build/\n*.o\n*.exe\n*.ll\n*.s\n", encoding="utf-8")
-        
-        console.print(f"[bold green]Created[/bold green] application '{name}'")
-    except Exception as e:
-        console.print(f"[bold red]error[/bold red]: failed to create project: {e}")
-        sys.exit(1)
-
+    project_dir.mkdir()
+    (project_dir / "src").mkdir()
+    (project_dir / "src" / "main.cx").write_text('func main() {\n    print("Hello, Cx!");\n}\n')
+    (project_dir / ".gitignore").write_text("/build/\n*.o\n*.exe\n*.ll\n*.s\n")
+    console.print(f"[bold green]Initialized[/bold green] project '{name}'")
 
 if __name__ == "__main__":
     app()

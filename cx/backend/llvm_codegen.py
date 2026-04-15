@@ -135,8 +135,8 @@ class LLVMCodegen:
     def lower(self, hir_mod: IRModule) -> str:
         """Lower the entire HIR module to LLVM IR and return the IR text."""
 
-        # 0. Inject native runtime (Windows Win32 API)
-        self._inject_runtime()
+        # 0. Declare native runtime functions (implemented in cx/backend/runtime.py)
+        self._declare_runtime()
 
         # 1. Forward-declare all functions (externs + implementations)
         import sys
@@ -165,76 +165,28 @@ class LLVMCodegen:
 
     # ---------------------------------------------------------------- function lowering
 
-    def _inject_runtime(self) -> None:
-        """Inject compiler-internal runtime functions using the Win32 API."""
+    def _declare_runtime(self) -> None:
+        """Declare compiler-internal runtime functions as externals."""
         _i32 = ll.IntType(32)
         _i64 = ll.IntType(64)
         _ptr = ll.PointerType(ll.IntType(8))
+        _str_struct_ty = ll.LiteralStructType([_ptr, _i64])
 
-        # --- Win32 kernel32 imports ---
-        # HANDLE GetStdHandle(DWORD nStdHandle)
-        get_std_h = ll.Function(self.module, ll.FunctionType(_ptr, [_i32]), name="GetStdHandle")
-        # BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped)
-        write_file = ll.Function(
-            self.module,
-            ll.FunctionType(
-                _i32,
-                [_ptr, _ptr, _i32, _i32.as_pointer(), _ptr]
-            ),
-            name="WriteFile"
-        )
-        # HANDLE GetProcessHeap()
-        get_heap = ll.Function(self.module, ll.FunctionType(_ptr, []), name="GetProcessHeap")
-        # LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
-        heap_alloc = ll.Function(self.module, ll.FunctionType(_ptr, [_ptr, _i32, _i64]), name="HeapAlloc")
-        # BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem)
-        heap_free = ll.Function(self.module, ll.FunctionType(_i32, [_ptr, _i32, _ptr]), name="HeapFree")
-
-        # --- Cx Runtime: __cx_print_str({char*, i64}) ---
-        str_struct_ty = ll.LiteralStructType([_ptr, _i64])
-        cx_print = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [str_struct_ty]), name="__cx_print_str")
-        cx_print_entry = cx_print.append_basic_block("entry")
-        builder = ll.IRBuilder(cx_print_entry)
+        # __cx_print_str({char*, i64})
+        fn_print_str = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [_str_struct_ty]), name="__cx_print_str")
+        self._funcs["__cx_print_str"] = fn_print_str
         
-        # Get handle
-        h_out = builder.call(get_std_h, [_i32(-11)]) # STD_OUTPUT_HANDLE
+        # __cx_print_int(i32)
+        fn_print_int = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [_i32]), name="__cx_print_int")
+        self._funcs["__cx_print_int"] = fn_print_int
         
-        # Extract ptr and len
-        arg_s = cx_print.args[0]
-        p_data = builder.extract_value(arg_s, 0)
-        u_len  = builder.extract_value(arg_s, 1)
-        u_len32 = builder.trunc(u_len, _i32)
+        # __cx_malloc(i64)
+        fn_malloc = ll.Function(self.module, ll.FunctionType(_ptr, [_i64]), name="__cx_malloc")
+        self._funcs["__cx_malloc"] = fn_malloc
         
-        # Call WriteFile
-        written = builder.alloca(_i32)
-        builder.call(write_file, [h_out, p_data, u_len32, written, ll.Constant(_ptr, None)])
-        
-        # Newline: write one byte '\n' (10 in ASCII)
-        nl_ptr = builder.alloca(_i8)
-        builder.store(_i8(10), nl_ptr)
-        builder.call(write_file, [h_out, nl_ptr, _i32(1), written, ll.Constant(_ptr, None)])
-        
-        builder.ret_void()
-        self._funcs["__cx_print_str"] = cx_print
-
-        # --- Cx Runtime: __cx_malloc(i64) ---
-        cx_malloc = ll.Function(self.module, ll.FunctionType(_ptr, [_i64]), name="__cx_malloc")
-        cx_malloc_entry = cx_malloc.append_basic_block("entry")
-        builder = ll.IRBuilder(cx_malloc_entry)
-        h_heap = builder.call(get_heap, [])
-        # dwFlags = 0x08 (HEAP_ZERO_MEMORY)
-        res = builder.call(heap_alloc, [h_heap, _i32(8), cx_malloc.args[0]])
-        builder.ret(res)
-        self._funcs["__cx_malloc"] = cx_malloc
-
-        # --- Cx Runtime: __cx_free(ptr) ---
-        cx_free = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [_ptr]), name="__cx_free")
-        cx_free_entry = cx_free.append_basic_block("entry")
-        builder = ll.IRBuilder(cx_free_entry)
-        h_heap = builder.call(get_heap, [])
-        builder.call(heap_free, [h_heap, _i32(0), cx_free.args[0]])
-        builder.ret_void()
-        self._funcs["__cx_free"] = cx_free
+        # __cx_free(ptr)
+        fn_free = ll.Function(self.module, ll.FunctionType(ll.VoidType(), [_ptr]), name="__cx_free")
+        self._funcs["__cx_free"] = fn_free
 
     def _lower_function(self, fn: IRFunction) -> None:
         ll_fn = self._funcs[fn.name]
@@ -294,6 +246,7 @@ class LLVMCodegen:
         if isinstance(actual, ll.IntType) and actual.width == 8 and isinstance(val, ll.Constant) and str(val).find("i8 0") != -1:
              if not isinstance(expected, ll.VoidType):
                  return ll.Constant(expected, None)
+             return val
 
         # Pointer ↔ pointer: bitcast
         if isinstance(actual, ll.PointerType) and isinstance(expected, ll.PointerType):
@@ -509,6 +462,9 @@ class LLVMCodegen:
             return ll.Constant(ll_ty, None)
 
         ll_ty = self._lower_type(ty)
+        if isinstance(ll_ty, ll.VoidType):
+            return ll.Constant(_i8, 0)
+
         try:
             return ll.Constant(ll_ty, instr.value)
         except Exception:
@@ -524,7 +480,10 @@ class LLVMCodegen:
             v = getattr(operand, 'value', None)
             if v is not None:
                 ll_ty = self._lower_type(operand.type) if operand.type else _i64
-            return ll.Constant(ll_ty, int(v))
+                if isinstance(ll_ty, ll.VoidType):
+                    return ll.Constant(_i8, 0)
+                return ll.Constant(ll_ty, int(v))
+            
             raise KeyError(f"Operand has no name and no value: {operand!r}")
 
         lv = _resolve(instr.left)
@@ -643,47 +602,34 @@ class LLVMCodegen:
             raise NotImplementedError(f"Unsupported cast op: {op!r}")
         return cast_fn(val, dest, name=instr.dest)
 
-    def _lower_call(self, instr: IRCall):
+    def _lower_call(self, instr: IRCall) -> ll.Value:
+        """Lowers a function call, including argument coercion and return value handling."""
         assert self._builder is not None
         b = self._builder
 
-        callee = self._funcs[instr.callee]
-
-        param_types = list(callee.function_type.args)
-        raw_args = [self._resolve_val(a) for a in instr.args]
-
-        args = []
-        for arg, param_ty in zip(raw_args, param_types):
-            args.append(self._coerce_arg(arg, param_ty))
-
-        res = b.call(callee, args, name=instr.dest if instr.dest else "")
-
-        return res
-
-        # Lazily declare unknown callees as external functions
         if instr.callee not in self._funcs:
+            # Fallback for undeclared internals or built-ins
             ret_ll  = self._lower_type(instr.ret_ty)
             args_ll = [self._lower_type(a.type) for a in instr.args]
             fn_ty   = ll.FunctionType(ret_ll, args_ll)
-            self._funcs[instr.callee] = ll.Function(
-                self.module, fn_ty, name=instr.callee
-            )
+            self._funcs[instr.callee] = ll.Function(self.module, fn_ty, name=instr.callee)
 
         callee = self._funcs[instr.callee]
         param_types = list(callee.function_type.args)
 
-        # Build coerced argument list
+        # Build and coerce arguments
         raw_args = [self._resolve_val(a) for a in instr.args]
         args: List[ll.Value] = []
         for i, (arg, param_ty) in enumerate(zip(raw_args, param_types)):
             args.append(self._coerce_arg(arg, param_ty))
-        # Variadic tail (no declared param type to coerce against)
-        args.extend(raw_args[len(param_types):])
+        
+        # Append remaining args for variadic functions
+        if len(raw_args) > len(param_types):
+            args.extend(raw_args[len(param_types):])
 
+        # Execute call
         res = b.call(callee, args, name=instr.dest if instr.dest else "")
-        if instr.dest:
-            res.hir_type = instr.ret_ty
-            self._vals[instr.dest] = res
+        return res
 
     # ---------------------------------------------------------------- terminator lowering
 
@@ -692,7 +638,7 @@ class LLVMCodegen:
         b = self._builder
 
         if isinstance(term, IRRet):
-            if term.value is None:
+            if term.value is None or isinstance(b.block.parent.function_type.return_type, ll.VoidType):
                 b.ret_void()
             else:
                 val = self._resolve_val(term.value)

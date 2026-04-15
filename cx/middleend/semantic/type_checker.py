@@ -41,6 +41,7 @@ class TypeChecker:
         # loaded module paths to avoid infinite recursion
         self._loaded_modules: Set[str] = set()
         self._builtins: Dict[str, FuncDecl] = self._make_builtins()
+        self._current_obj: Optional[ObjCxType] = None
 
     def _make_builtins(self) -> Dict[str, FuncDecl]:
         """Define compiler-intrinsic functions."""
@@ -209,6 +210,13 @@ class TypeChecker:
             for tp in fn.type_params:
                 self._tbl.define(Symbol(tp, SymKind.TYPE, fn.loc,
                                         cx_type=GenericCxType(tp)))
+            
+            # self: T[ptr] (if in an object method)
+            if self._current_obj:
+                self_ty = PtrCxType(self._current_obj)
+                self._tbl.define(Symbol("self", SymKind.PARAM, fn.loc, 
+                                        cx_type=self_ty, is_mut=True))
+
             # params
             for p in fn.params:
                 ptype = self._resolve_type_node(p.type_node)
@@ -246,9 +254,28 @@ class TypeChecker:
                 fields.append((fd.name, ftype))
                 self._tbl.define(Symbol(fd.name, SymKind.VAR, fd.loc,
                                         cx_type=ftype))
+            
+            # Assign fields to the type before checking methods so 'self.field' works
+            cy.fields = fields
+            
+            # Track methods in the type
+            methods: Dict[str, FuncCxType] = {}
+            # Pre-populate method signatures so they can call each other
+            for method in obj.methods:
+                m_params = [self._resolve_type_node(p.type_node) for p in method.params]
+                m_params.insert(0, PtrCxType(cy))
+                m_ret = self._resolve_type_node(method.ret_type) if method.ret_type else VOID
+                methods[method.name] = FuncCxType(m_params, m_ret)
+            
+            cy.methods = methods
+            
+            old_obj = self._current_obj
+            self._current_obj = cy
+            
             for method in obj.methods:
                 self._check_func(method)
-        cy.fields = fields
+            
+            self._current_obj = old_obj
 
     # ---------------------------------------------------------------- enum
 
@@ -501,6 +528,9 @@ class TypeChecker:
         if isinstance(expr, MethodCallExpr):
             return self._infer_method_call(expr)
 
+        if isinstance(expr, NewExpr):
+            return self._infer_new_expr(expr)
+
         if isinstance(expr, FieldExpr):
             return self._infer_field(expr)
 
@@ -701,22 +731,65 @@ class TypeChecker:
         recv_ty = self._check_expr(expr.receiver)
         for a in expr.args:
             self._check_expr(a)
+        if isinstance(recv_ty, PtrCxType):
+            recv_ty = recv_ty.pointee
+        
         if isinstance(recv_ty, ObjCxType):
             method = recv_ty.methods.get(expr.method)
             if method:
                 return method.ret
+            self._rep.error(f"object '{recv_ty.name}' has no method '{expr.method}'", expr.loc)
+        else:
+            self._rep.error(f"cannot call method '{expr.method}' on non-object type {recv_ty!r}", expr.loc)
         return VOID
+
+    def _infer_new_expr(self, expr: NewExpr) -> CxType:
+        res_ty = self._resolve_type_node(expr.type_node)
+        obj_ty = res_ty
+        if isinstance(obj_ty, PtrCxType):
+            obj_ty = obj_ty.pointee
+        
+        if not isinstance(obj_ty, ObjCxType):
+             self._rep.error(f"'new' can only be used with object types, got {res_ty!r}", expr.loc)
+             return PtrCxType(res_ty) # Best effort return
+             
+        # Ensure we have a pointer to the object
+        ret_ty = PtrCxType(obj_ty)
+        expr.resolved_type = ret_ty
+
+        # Find 'init' method
+        init_method = obj_ty.methods.get("init")
+        if init_method:
+            # Check arguments (skip 'self' which is first in FuncCxType.params)
+            expected_args = init_method.params[1:]
+            if len(expr.args) != len(expected_args):
+                self._rep.error(f"'init' expected {len(expected_args)} arguments, got {len(expr.args)}", expr.loc)
+            else:
+                for arg_expr, expected_ty in zip(expr.args, expected_args):
+                    got_ty = self._check_expr(arg_expr)
+                    if not self._assignable(expected_ty, got_ty):
+                        self._rep.error(f"argument type mismatch for 'init': expected {expected_ty!r}, got {got_ty!r}", arg_expr.loc)
+        elif expr.args:
+            self._rep.error(f"object '{obj_ty.name}' has no 'init' method, but arguments were provided", expr.loc)
+            
+        return ret_ty
 
     # ---------------------------------------------------------------- field
 
     def _infer_field(self, expr: FieldExpr) -> CxType:
         obj_ty = self._check_expr(expr.obj)
+        if isinstance(obj_ty, PtrCxType):
+            obj_ty = obj_ty.pointee
+            
         if isinstance(obj_ty, ObjCxType):
             for fname, ftype in obj_ty.fields:
                 if fname == expr.field:
                     return ftype
-        if isinstance(obj_ty, ArrCxType) and expr.field == "len":
+            self._rep.error(f"object '{obj_ty.name}' has no field '{expr.field}'", expr.loc)
+        elif isinstance(obj_ty, ArrCxType) and expr.field == "len":
             return U64
+        else:
+            self._rep.error(f"cannot access field '{expr.field}' on non-object type {obj_ty!r}", expr.loc)
         return VOID
 
     # ================================================================
