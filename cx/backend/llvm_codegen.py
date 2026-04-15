@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Any
 from ..config import CompileOptions, OptLevel, EmitKind
 from ..middleend.ir.nodes import (
     IRModule, IRFunction, IRBlock,
-    IRAlloca, IRLoad, IRStore, IRBinOp, IRUnOp, IRCall,
+    IRAlloca, IRLoad, IRStore, IRBinOp, IRUnOp, IRCall, IRIntLit,
     IRGEP, IRCast, IRConst, IRBr, IRCondBr, IRRet, IRUnreachable
 )
 from ..middleend.semantic.type_system import (
@@ -175,7 +175,14 @@ class LLVMCodegen:
         # HANDLE GetStdHandle(DWORD nStdHandle)
         get_std_h = ll.Function(self.module, ll.FunctionType(_ptr, [_i32]), name="GetStdHandle")
         # BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped)
-        write_file = ll.Function(self.module, ll.FunctionType(_i32, [_ptr, _ptr, _i32, _ptr, _ptr]), name="WriteFile")
+        write_file = ll.Function(
+            self.module,
+            ll.FunctionType(
+                _i32,
+                [_ptr, _ptr, _i32, _i32.as_pointer(), _ptr]
+            ),
+            name="WriteFile"
+        )
         # HANDLE GetProcessHeap()
         get_heap = ll.Function(self.module, ll.FunctionType(_ptr, []), name="GetProcessHeap")
         # LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
@@ -302,8 +309,14 @@ class LLVMCodegen:
     # ---------------------------------------------------------------- instruction lowering
 
     def _lower_instr(self, instr: Any) -> None:  # noqa: C901 (complex but exhaustive)
+        print(f"LOWERING: ", instr)
         assert self._builder is not None
         b = self._builder
+        print("IRAlloca identity:", IRAlloca)
+        print("instr identity:", type(instr))
+        print("same module:", IRAlloca.__module__, type(instr).__module__)
+        print("FILE:", __file__)
+        print("LOWER INSTR ENTRY")
 
         # ---- Memory ----
 
@@ -441,7 +454,12 @@ class LLVMCodegen:
         # ---- Calls ----
 
         elif isinstance(instr, IRCall):
-            self._lower_call(instr)
+            val = self._lower_call(instr)
+            if instr.dest is not None:
+                # we avoid gaps
+                if not isinstance(val.type, ll.VoidType):
+                    val.hir_type = instr.type
+                    self._vals[instr.dest] = val
 
     def _lower_const(self, instr: IRConst) -> ll.Value:
         assert self._builder is not None
@@ -468,8 +486,10 @@ class LLVMCodegen:
             return ll.Constant(ll_ty, 0)
 
     def _lower_binop(self, instr: IRBinOp) -> ll.Value:
+        print("BINOP:", instr.left.name, instr.right.name, "VALS:", self._vals.keys())
         assert self._builder is not None
         b  = self._builder
+
         lv = self._vals[instr.left.name]
         rv = self._vals[instr.right.name]
 
@@ -483,53 +503,51 @@ class LLVMCodegen:
 
         # Arithmetic
         if op == "+":
-            return b.fadd(lv, rv, name=instr.dest) if is_fp else b.add(lv, rv, name=instr.dest)
-        if op == "-":
-            return b.fsub(lv, rv, name=instr.dest) if is_fp else b.sub(lv, rv, name=instr.dest)
-        if op == "*":
-            return b.fmul(lv, rv, name=instr.dest) if is_fp else b.mul(lv, rv, name=instr.dest)
-        if op == "/":
-            if is_fp:       return b.fdiv(lv, rv, name=instr.dest)
-            if is_signed:   return b.sdiv(lv, rv, name=instr.dest)
-            return b.udiv(lv, rv, name=instr.dest)
-        if op == "%":
-            if is_fp:       return b.frem(lv, rv, name=instr.dest)
-            if is_signed:   return b.srem(lv, rv, name=instr.dest)
-            return b.urem(lv, rv, name=instr.dest)
+            val = b.fadd(lv, rv, name=instr.dest) if is_fp else b.add(lv, rv, name=instr.dest)
+        elif op == "-":
+            val = b.fsub(lv, rv, name=instr.dest) if is_fp else b.sub(lv, rv, name=instr.dest)
+        elif op == "*":
+            val = b.fmul(lv, rv, name=instr.dest) if is_fp else b.mul(lv, rv, name=instr.dest)
+        elif op == "/":
+            if is_fp:       val = b.fdiv(lv, rv, name=instr.dest)
+            elif is_signed: val = b.sdiv(lv, rv, name=instr.dest)
+            else:           val = b.udiv(lv, rv, name=instr.dest)
+        elif op == "%":
+            if is_fp:       val = b.frem(lv, rv, name=instr.dest)
+            elif is_signed: val = b.srem(lv, rv, name=instr.dest)
+            else:           val = b.urem(lv, rv, name=instr.dest)
 
         # Bitwise
-        if op == "&":   return b.and_(lv, rv, name=instr.dest)
-        if op == "|":   return b.or_(lv, rv, name=instr.dest)
-        if op == "^":   return b.xor(lv, rv, name=instr.dest)
-        if op == "<<":  return b.shl(lv, rv, name=instr.dest)
-        if op == ">>":
-            return b.ashr(lv, rv, name=instr.dest) if is_signed else b.lshr(lv, rv, name=instr.dest)
+        elif op == "&":
+            val = b.and_(lv, rv, name=instr.dest)
+        elif op == "|":
+            val = b.or_(lv, rv, name=instr.dest)
+        elif op == "^":
+            val = b.xor(lv, rv, name=instr.dest)
+        elif op == "<<":
+            val = b.shl(lv, rv, name=instr.dest)
+        elif op == ">>":
+            val = b.ashr(lv, rv, name=instr.dest) if is_signed else b.lshr(lv, rv, name=instr.dest)
 
         # Comparisons
-        if op == "==":
-            return b.fcmp_ordered("==", lv, rv, name=instr.dest) if is_fp \
-                else b.icmp_signed("==", lv, rv, name=instr.dest)
-        if op == "!=":
-            return b.fcmp_unordered("!=", lv, rv, name=instr.dest) if is_fp \
-                else b.icmp_signed("!=", lv, rv, name=instr.dest)
-        if op == "<":
-            if is_fp:       return b.fcmp_ordered("<", lv, rv, name=instr.dest)
-            if is_signed:   return b.icmp_signed("<", lv, rv, name=instr.dest)
-            return b.icmp_unsigned("<", lv, rv, name=instr.dest)
-        if op == ">":
-            if is_fp:       return b.fcmp_ordered(">", lv, rv, name=instr.dest)
-            if is_signed:   return b.icmp_signed(">", lv, rv, name=instr.dest)
-            return b.icmp_unsigned(">", lv, rv, name=instr.dest)
-        if op == "<=":
-            if is_fp:       return b.fcmp_ordered("<=", lv, rv, name=instr.dest)
-            if is_signed:   return b.icmp_signed("<=", lv, rv, name=instr.dest)
-            return b.icmp_unsigned("<=", lv, rv, name=instr.dest)
-        if op == ">=":
-            if is_fp:       return b.fcmp_ordered(">=", lv, rv, name=instr.dest)
-            if is_signed:   return b.icmp_signed(">=", lv, rv, name=instr.dest)
-            return b.icmp_unsigned(">=", lv, rv, name=instr.dest)
+        elif op == "==":
+            val = b.fcmp_ordered("==", lv, rv, name=instr.dest) if is_fp else b.icmp_signed("==", lv, rv, name=instr.dest)
+        elif op == "!=":
+            val = b.fcmp_unordered("!=", lv, rv, name=instr.dest) if is_fp else b.icmp_signed("!=", lv, rv, name=instr.dest)
+        elif op == "<":
+            val = b.fcmp_ordered("<", lv, rv, name=instr.dest) if is_fp else b.icmp_signed("<", lv, rv, name=instr.dest)
+        elif op == ">":
+            val = b.fcmp_ordered(">", lv, rv, name=instr.dest) if is_fp else b.icmp_signed(">", lv, rv, name=instr.dest)
+        elif op == "<=":
+            val = b.fcmp_ordered("<=", lv, rv, name=instr.dest) if is_fp else b.icmp_signed("<=", lv, rv, name=instr.dest)
+        elif op == ">=":
+            val = b.fcmp_ordered(">=", lv, rv, name=instr.dest) if is_fp else b.icmp_signed(">=", lv, rv, name=instr.dest)
 
-        raise NotImplementedError(f"Unsupported binary operator: {op!r}")
+        else:
+            raise NotImplementedError(f"Unsupported binary operator: {op!r}")
+
+        self._vals[instr.dest] = val
+        return val
 
     def _lower_unop(self, instr: IRUnOp) -> ll.Value:
         assert self._builder is not None
@@ -580,9 +598,22 @@ class LLVMCodegen:
             raise NotImplementedError(f"Unsupported cast op: {op!r}")
         return cast_fn(val, dest, name=instr.dest)
 
-    def _lower_call(self, instr: IRCall) -> None:
+    def _lower_call(self, instr: IRCall):
         assert self._builder is not None
         b = self._builder
+
+        callee = self._funcs[instr.callee]
+
+        param_types = list(callee.function_type.args)
+        raw_args = [self._vals[a.name] for a in instr.args]
+
+        args = []
+        for arg, param_ty in zip(raw_args, param_types):
+            args.append(self._coerce_arg(arg, param_ty))
+
+        res = b.call(callee, args, name=instr.dest if instr.dest else "")
+
+        return res
 
         # Lazily declare unknown callees as external functions
         if instr.callee not in self._funcs:

@@ -47,6 +47,11 @@ class IRInstr:
 class IRAlloca(IRInstr):
     """dest = alloca type (stack allocation)."""
     cx_type: Any = None
+    name: Optional[str] = None
+    dest: str
+
+    def __repr__(self) -> str:
+        return f"{self.dest} = alloca {self.cx_type}"
 
 
 @dataclass
@@ -109,6 +114,16 @@ class IRConst(IRInstr):
     value: Any = None
     type:  Any = None
 
+@dataclass
+class IRBinary(IRInstr):
+    op: str = ""
+    left: IRValue = field(default_factory=lambda: UNDEF)
+    right: IRValue = field(default_factory=lambda: UNDEF)
+    type: Any = None
+
+    def __repr__(self) -> str:
+        return f"{self.dest} = {self.op} {self.left}, {self.right}"
+
 
 @dataclass
 class IRPhi(IRInstr):
@@ -116,6 +131,14 @@ class IRPhi(IRInstr):
     edges: List[tuple] = field(default_factory=list)   # [(IRValue, str), …]
     type:  Any         = None
 
+@dataclass 
+class IRIntLit(IRInstr):
+    value: int = 0
+    type: Any = None
+    name: Optional[str] = None
+
+    def __repr__(self) -> str:
+        return f"{self.value}"
 
 # ---------------------------------------------------------------------------
 # Terminators (exactly one per basic block)

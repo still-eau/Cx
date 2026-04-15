@@ -13,7 +13,7 @@ from ...frontend.ast import *
 from .nodes import (
     IRModule, IRFunction, IRBlock, IRValue, UNDEF,
     IRAlloca, IRLoad, IRStore, IRBinOp, IRUnOp, IRCall,
-    IRGEP, IRCast, IRConst, IRBr, IRCondBr, IRRet, IRUnreachable
+    IRGEP, IRCast, IRConst, IRBr, IRCondBr, IRRet, IRUnreachable, IRIntLit, IRBinary
 )
 from ..semantic.type_system import (
     CxType, PrimCxType, PtrCxType, OptCxType, ObjCxType, EnumCxType,
@@ -582,8 +582,8 @@ class IRBuilder:
             
             # Calculate total size: count * sizeof(element_type)
             elem_size  = self._sizeof(expr.type_node)
-            sz_const   = IRIntLit(name=None, value=elem_size, type=INT)
-            total_size = self._next_reg(INT)
+            sz_const   = IRIntLit(name=None, value=elem_size, type=I32)
+            total_size = self._next_reg(I32)
             self._block.emit(IRBinary(dest=total_size.name, op="*", left=count, right=sz_const))
             
             # Call native malloc
