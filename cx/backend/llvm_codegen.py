@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 
 from ..config import CompileOptions, OptLevel, EmitKind
 from ..middleend.ir.nodes import (
-    IRModule, IRFunction, IRBlock,
+    IRModule, IRFunction, IRBlock, IRBinary,
     IRAlloca, IRLoad, IRStore, IRBinOp, IRUnOp, IRCall, IRIntLit,
     IRGEP, IRCast, IRConst, IRBr, IRCondBr, IRRet, IRUnreachable
 )
@@ -313,8 +313,6 @@ class LLVMCodegen:
         assert self._builder is not None
         b = self._builder
         print("IRAlloca identity:", IRAlloca)
-        print("instr identity:", type(instr))
-        print("same module:", IRAlloca.__module__, type(instr).__module__)
         print("FILE:", __file__)
         print("LOWER INSTR ENTRY")
 
@@ -369,7 +367,7 @@ class LLVMCodegen:
 
         # ---- Arithmetic / comparison ----
 
-        elif isinstance(instr, IRBinOp):
+        elif isinstance(instr, (IRBinOp, IRBinary)):
             val = self._lower_binop(instr)
             val.hir_type = instr.type
             self._vals[instr.dest] = val
@@ -456,9 +454,8 @@ class LLVMCodegen:
         elif isinstance(instr, IRCall):
             val = self._lower_call(instr)
             if instr.dest is not None:
-                # we avoid gaps
                 if not isinstance(val.type, ll.VoidType):
-                    val.hir_type = instr.type
+                    val.hir_type = instr.ret_ty
                     self._vals[instr.dest] = val
 
     def _lower_const(self, instr: IRConst) -> ll.Value:
@@ -487,11 +484,20 @@ class LLVMCodegen:
 
     def _lower_binop(self, instr: IRBinOp) -> ll.Value:
         print("BINOP:", instr.left.name, instr.right.name, "VALS:", self._vals.keys())
-        assert self._builder is not None
         b  = self._builder
 
-        lv = self._vals[instr.left.name]
-        rv = self._vals[instr.right.name]
+        def _resolve(operand):
+            if operand.name is not None:
+                return self._vals[operand.name]
+            
+            v = getattr(operand, 'value', None)
+            if v is not None:
+                ll_ty = self._lower_type(operand.type) if operand.type else _i64
+            return ll.Constant(ll_ty, int(v))
+            raise KeyError(f"Operand has no name and no value: {operand!r}")
+
+        lv = _resolve(instr.left)
+        rv = _resolve(instr.right)
 
         is_fp     = False
         is_signed = True
