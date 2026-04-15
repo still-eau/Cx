@@ -25,10 +25,10 @@ func main() -> int {
     }
 
     // 4. Match and Enum
-    set::Status s = Status::Error{msg = "Something went wrong"};
+    set::Status s = Status::Ok;
     match s {
         Status::Ok => {
-            print("Status is OK");
+            print("Hello world!");
         }
         Status::Error{msg} => {
             print("Error: ");

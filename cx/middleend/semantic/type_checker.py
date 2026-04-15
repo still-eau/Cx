@@ -155,9 +155,6 @@ class TypeChecker:
                 return
             self._loaded_modules.add(path_file)
             
-            import sys
-            sys.stderr.write(f"DEBUG: Loading module from {path_file}\n")
-            
             # Load and parse the module
             if os.path.exists(path_file):
                 try:

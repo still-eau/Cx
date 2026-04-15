@@ -46,8 +46,6 @@ class IRBuilder:
     # ================================================================
 
     def build(self, program: Program) -> IRModule:
-        import sys
-        sys.stderr.write(f"DEBUG: IRBuilder building module {self.module.name} from {len(program.items)} items\n")
         for item in program.items:
             self._build_item(item)
         return self.module
@@ -101,8 +99,6 @@ class IRBuilder:
 
     def _build_item(self, item: Item) -> None:
         if isinstance(item, FuncDecl):
-            import sys
-            sys.stderr.write(f"DEBUG: IRBuilder processing function '{item.name}' (has_body={item.body is not None})\n")
             self._build_func(item)
         elif isinstance(item, VarDecl):
             # Globals (simplified, usually need a global init pass)
@@ -225,13 +221,19 @@ class IRBuilder:
             
             self._block.terminate(IRCondBr(cond=cond_val, true_label=then_lbl, false_label=false_lbl))
             
-            # Then
             self._block = self._fn.add_block(then_lbl)
             self._build_block(stmt.then_body)
-            if isinstance(self._block.terminator, IRUnreachable):
-                self._block.terminate(IRBr(merge_lbl))
-                
-            # TODO: elif branches
+            if self._block.terminator is None:
+                self._block.terminate(IRBr(merge_lbl)) 
+
+            for elif_branch in stmt.elif_branches:
+                elif_cond_val = self._build_expr(elif_branch.cond)
+                elif_lbl = self._next_label("elif_")
+                self._block.terminate(IRCondBr(cond=elif_cond_val, true_label=elif_lbl, false_label=else_lbl))
+                self._block = self._fn.add_block(elif_lbl)
+                self._build_block(elif_branch.body)
+                if self._block.terminator is None:
+                    self._block.terminate(IRBr(merge_lbl)) 
                 
             # Else
             if stmt.else_body:
@@ -295,10 +297,12 @@ class IRBuilder:
                 self._build_block(stmt.body)
                 
                 # Increment
+                fresh_i = self._next_reg(start_v.type)
+                self._block.emit(IRLoad(dest=fresh_i.name, ptr=i_ptr))
                 one = self._next_reg(start_v.type)
                 self._block.emit(IRConst(dest=one.name, value=1, type=start_v.type))
                 next_i = self._next_reg(start_v.type)
-                self._block.emit(IRBinOp(dest=next_i.name, op="+", left=curr_i, right=one, type=start_v.type))
+                self._block.emit(IRBinOp(dest=next_i.name, op="+", left=fresh_i, right=one, type=start_v.type))
                 self._block.emit(IRStore(value=next_i, ptr=i_ptr))
                 
                 if not isinstance(self._block.terminator, (IRRet, IRBr, IRCondBr)):
@@ -328,6 +332,10 @@ class IRBuilder:
             tag_val = self._next_reg(I32)
             self._block.emit(IRLoad(dest=tag_val.name, ptr=tag_ptr))
             
+            # Store tag for usage in different blocks (arms) - avoids using a stale register
+            tag_alloca = self._declare_var("__match_tag", I32)
+            self._block.emit(IRStore(value=tag_val, ptr=tag_alloca))
+            
             merge_lbl = self._next_label("match_merge_")
             
             # Map variants to blocks
@@ -344,18 +352,42 @@ class IRBuilder:
                     is_match = self._next_reg(BOOL)
                     match_tag = self._next_reg(I32)
                     self._block.emit(IRConst(dest=match_tag.name, value=v_idx, type=I32))
-                    self._block.emit(IRBinOp(dest=is_match.name, op="==", left=tag_val, right=match_tag, type=BOOL))
+                    
+                    # Reload tag from memory to ensure correct SSA/visibility across blocks
+                    tag_reloaded = self._next_reg(I32)
+                    self._block.emit(IRLoad(dest=tag_reloaded.name, ptr=tag_alloca))
+                    
+                    self._block.emit(IRBinOp(dest=is_match.name, op="==", left=tag_reloaded, right=match_tag, type=BOOL))
                     self._block.terminate(IRCondBr(cond=is_match, true_label=arm_lbl, false_label=next_arm_lbl))
                     
                     # Arm Body
                     self._block = self._fn.add_block(arm_lbl)
                     self._push_scope()
-                    # Bindings
+                    
+                    # Bindings: unpack fields from the payload
                     if arm.pattern.fields:
-                        payload_ptr = self._next_reg(PtrCxType(VOID))
-                        # GEP to payload then bitcast
-                        # ... bindings logic ...
-                        pass
+                        variant_fields = subject_ty.variants[v_idx][1]
+                        payload_ptr = self._next_reg(PtrCxType(I32))
+                        self._block.emit(IRGEP(dest=payload_ptr.name, ptr=subject_v, indices=[0, 1]))
+                        
+                        var_struct_ty = TupleCxType([f_ty for _, f_ty in variant_fields])
+                        var_ptr = self._next_reg(PtrCxType(var_struct_ty))
+                        self._block.emit(IRCast(dest=var_ptr.name, kind="bitcast", value=payload_ptr, to_type=PtrCxType(var_struct_ty)))
+                        
+                        field_map = {name: i for i, (name, _) in enumerate(variant_fields)}
+                        for binding_name in arm.pattern.fields:
+                            idx = field_map[binding_name]
+                            f_ty = variant_fields[idx][1]
+                            
+                            f_ptr = self._next_reg(PtrCxType(f_ty))
+                            self._block.emit(IRGEP(dest=f_ptr.name, ptr=var_ptr, indices=[0, idx]))
+                            
+                            f_val = self._next_reg(f_ty)
+                            self._block.emit(IRLoad(dest=f_val.name, ptr=f_ptr))
+                            
+                            # Declare and store in environment (shadows outer scope)
+                            new_ptr = self._declare_var(binding_name, f_ty)
+                            self._block.emit(IRStore(value=f_val, ptr=new_ptr))
                     
                     self._build_block(arm.body)
                     self._pop_scope()
@@ -465,7 +497,7 @@ class IRBuilder:
                 
                 self._block.emit(IRCall(dest=res.name if expr.resolved_type != VOID else None, 
                                         callee=callee, args=args, ret_ty=expr.resolved_type))
-                return res
+                return res if expr.resolved_type != VOID else UNDEF
             
         if isinstance(expr, NullLit):
             res = self._next_reg(NULL)
@@ -511,14 +543,34 @@ class IRBuilder:
                     v_idx = i
                     break
             
-            # Set tag
+            # 1. Set tag
             tag_ptr = self._next_reg(PtrCxType(I32))
             self._block.emit(IRGEP(dest=tag_ptr.name, ptr=res_ptr, indices=[0, 0]))
             tag_val = self._next_reg(I32)
             self._block.emit(IRConst(dest=tag_val.name, value=v_idx, type=I32))
             self._block.emit(IRStore(value=tag_val, ptr=tag_ptr))
             
-            # TODO: pack fields into payload
+            # 2. Pack fields into payload (if any)
+            variant_fields = ety.variants[v_idx][1]
+            if variant_fields:
+                # payload_ptr is a pointer to the [32 x i8] payload
+                payload_ptr = self._next_reg(PtrCxType(I32))
+                self._block.emit(IRGEP(dest=payload_ptr.name, ptr=res_ptr, indices=[0, 1]))
+                
+                # Bitcast payload_ptr to a pointer to the specific variant tuple-struct
+                var_struct_ty = TupleCxType([f_ty for _, f_ty in variant_fields])
+                var_ptr = self._next_reg(PtrCxType(var_struct_ty))
+                self._block.emit(IRCast(dest=var_ptr.name, kind="bitcast", value=payload_ptr, to_type=PtrCxType(var_struct_ty)))
+                
+                field_map = {name: idx for idx, (name, _) in enumerate(variant_fields)}
+                for f_name, f_val_expr in expr.fields:
+                    idx = field_map[f_name]
+                    f_ty = variant_fields[idx][1]
+                    f_val = self._build_expr(f_val_expr)
+                    
+                    f_ptr = self._next_reg(PtrCxType(f_ty))
+                    self._block.emit(IRGEP(dest=f_ptr.name, ptr=var_ptr, indices=[0, idx]))
+                    self._block.emit(IRStore(value=f_val, ptr=f_ptr))
             
             res = self._next_reg(expr.resolved_type)
             self._block.emit(IRLoad(dest=res.name, ptr=res_ptr))

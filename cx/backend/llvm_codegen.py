@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 
 from ..config import CompileOptions, OptLevel, EmitKind
 from ..middleend.ir.nodes import (
-    IRModule, IRFunction, IRBlock, IRBinary,
+    IRModule, IRFunction, IRBlock, IRBinary, IRValue,
     IRAlloca, IRLoad, IRStore, IRBinOp, IRUnOp, IRCall, IRIntLit,
     IRGEP, IRCast, IRConst, IRBr, IRCondBr, IRRet, IRUnreachable
 )
@@ -140,7 +140,7 @@ class LLVMCodegen:
 
         # 1. Forward-declare all functions (externs + implementations)
         import sys
-        sys.stderr.write(f"DEBUG: LLVMCodegen lowering {len(hir_mod.functions)} functions and {len(hir_mod.externs)} externs\n")
+        # sys.stderr.write(f"DEBUG: LLVMCodegen lowering {len(hir_mod.functions)} functions and {len(hir_mod.externs)} externs\n")
         for fn in hir_mod.externs + hir_mod.functions:
             if fn.name in self._funcs:
                 continue
@@ -149,11 +149,11 @@ class LLVMCodegen:
             fn_ty   = ll.FunctionType(ret_ll, args_ll)
             ll_fn   = ll.Function(self.module, fn_ty, name=fn.name)
             self._funcs[fn.name] = ll_fn
-            sys.stderr.write(f"DEBUG: LLVMCodegen declared '{fn.name}'\n")
+            # sys.stderr.write(f"DEBUG: LLVMCodegen declared '{fn.name}'\n")
 
         # 2. Emit function bodies
         for fn in hir_mod.functions:
-            sys.stderr.write(f"DEBUG: LLVMCodegen emitting body for '{fn.name}'\n")
+            # sys.stderr.write(f"DEBUG: LLVMCodegen emitting body for '{fn.name}'\n")
             self._lower_function(fn)
 
         # 3. Verify + stringify
@@ -208,6 +208,12 @@ class LLVMCodegen:
         # Call WriteFile
         written = builder.alloca(_i32)
         builder.call(write_file, [h_out, p_data, u_len32, written, ll.Constant(_ptr, None)])
+        
+        # Newline: write one byte '\n' (10 in ASCII)
+        nl_ptr = builder.alloca(_i8)
+        builder.store(_i8(10), nl_ptr)
+        builder.call(write_file, [h_out, nl_ptr, _i32(1), written, ll.Constant(_ptr, None)])
+        
         builder.ret_void()
         self._funcs["__cx_print_str"] = cx_print
 
@@ -254,14 +260,41 @@ class LLVMCodegen:
                 self._lower_instr(instr)
             self._lower_terminator(b.terminator)
 
-    # ---------------------------------------------------------------- helpers
+    def _resolve_val(self, val: IRValue) -> ll.Value:
+        # Resolve the intended LLVM type for this value.
+        # Note: If it's UNDEF, val.type might be None/VOID.
+        ll_ty = self._lower_type(val.type or VOID)
+        
+        if val.name == "undef" or val.name == "" or val.name is None:
+            if isinstance(ll_ty, ll.VoidType):
+                # Return a dummy untyped-like constant. 
+                # Instructions using this MUST check for VoidType manually.
+                return ll.Constant(_i8, 0)
+            return ll.Constant(ll_ty, None) # LLVM 'undef'
+        
+        # Check integer literals
+        if isinstance(val.name, str) and val.name.isdigit():
+             return ll.Constant(ll_ty, int(val.name))
+             
+        if val.name in self._vals:
+            return self._vals[val.name]
+            
+        raise KeyError(f"Value name not found: {val.name!r}")
 
     def _coerce_arg(self, val: ll.Value, expected: ll.Type) -> ll.Value:
         """Best-effort coercion when an argument type doesn't match exactly."""
-        assert self._builder is not None
+        if self._builder is None: return val # Should not happen
+        
         actual = val.type
         if actual == expected:
             return val
+            
+        # If we have a dummy i8 0 from a void/undef return, promote it to a typed undef
+        # to avoid invalid bitcasts to structs or non-matching pointers.
+        if isinstance(actual, ll.IntType) and actual.width == 8 and isinstance(val, ll.Constant) and str(val).find("i8 0") != -1:
+             if not isinstance(expected, ll.VoidType):
+                 return ll.Constant(expected, None)
+
         # Pointer ↔ pointer: bitcast
         if isinstance(actual, ll.PointerType) and isinstance(expected, ll.PointerType):
             return self._builder.bitcast(val, expected)
@@ -309,12 +342,8 @@ class LLVMCodegen:
     # ---------------------------------------------------------------- instruction lowering
 
     def _lower_instr(self, instr: Any) -> None:  # noqa: C901 (complex but exhaustive)
-        print(f"LOWERING: ", instr)
         assert self._builder is not None
         b = self._builder
-        print("IRAlloca identity:", IRAlloca)
-        print("FILE:", __file__)
-        print("LOWER INSTR ENTRY")
 
         # ---- Memory ----
 
@@ -325,9 +354,12 @@ class LLVMCodegen:
             self._vals[instr.dest] = val
 
         elif isinstance(instr, IRStore):
-            val = self._vals[instr.value.name]
-            ptr = self._vals[instr.ptr.name]
-
+            val = self._resolve_val(instr.value)
+            ptr = self._resolve_val(instr.ptr)
+            
+            if isinstance(val.type, ll.VoidType):
+                return # Skip storing void
+            
             ptr_hir = getattr(ptr, 'hir_type', instr.ptr.type)
             if hasattr(ptr_hir, 'pointee'):
                 target_ll_ty = self._lower_type(ptr_hir.pointee)
@@ -343,7 +375,7 @@ class LLVMCodegen:
             b.store(val, ptr)
 
         elif isinstance(instr, IRLoad):
-            ptr = self._vals[instr.ptr.name]
+            ptr = self._resolve_val(instr.ptr)
             # When using opaque pointers, load requires the element type
             ptr_hir = getattr(ptr, 'hir_type', instr.ptr.type)
             if hasattr(ptr_hir, 'pointee'):
@@ -387,7 +419,7 @@ class LLVMCodegen:
         # ---- Pointer arithmetic ----
 
         elif isinstance(instr, IRGEP):
-            ptr = self._vals[instr.ptr.name]
+            ptr = self._resolve_val(instr.ptr)
             
             # Defensive: if we are GEPing a value instead of a pointer, spill it to a temporary
             if not isinstance(ptr.type, ll.PointerType):
@@ -399,7 +431,7 @@ class LLVMCodegen:
 
             indices = [
                 ll.Constant(_i32, idx) if isinstance(idx, int)
-                else self._vals[idx.name]
+                else self._resolve_val(idx)
                 for idx in instr.indices
             ]
             
@@ -483,7 +515,6 @@ class LLVMCodegen:
             return ll.Constant(ll_ty, 0)
 
     def _lower_binop(self, instr: IRBinOp) -> ll.Value:
-        print("BINOP:", instr.left.name, instr.right.name, "VALS:", self._vals.keys())
         b  = self._builder
 
         def _resolve(operand):
@@ -579,9 +610,17 @@ class LLVMCodegen:
     def _lower_cast(self, instr: IRCast) -> ll.Value:
         assert self._builder is not None
         b    = self._builder
-        val  = self._vals[instr.value.name]
+        val  = self._resolve_val(instr.value)
         dest = self._lower_type(instr.to_type)
-        op   = instr.cast_op  # e.g. "trunc", "zext", "sext", "fpext", "fptrunc",
+        
+        # If we are casting an 'undef' that resolve_val couldn't type properly (so it returned i8 0),
+        # replace it with a properly typed undef for this cast destination.
+        if isinstance(val.type, ll.IntType) and val.type.width == 8 and isinstance(dest, (ll.AggregateType, ll.PointerType)):
+            # Check if it was actually a void/undef in HIR
+            if instr.value.name in ("undef", "", None):
+                return ll.Constant(dest, None)
+
+        op   = instr.kind  # e.g. "trunc", "zext", "sext", "fpext", "fptrunc",
                                #      "fptoui", "fptosi", "uitofp", "sitofp",
                                #      "inttoptr", "ptrtoint", "bitcast"
 
@@ -611,7 +650,7 @@ class LLVMCodegen:
         callee = self._funcs[instr.callee]
 
         param_types = list(callee.function_type.args)
-        raw_args = [self._vals[a.name] for a in instr.args]
+        raw_args = [self._resolve_val(a) for a in instr.args]
 
         args = []
         for arg, param_ty in zip(raw_args, param_types):
@@ -634,7 +673,7 @@ class LLVMCodegen:
         param_types = list(callee.function_type.args)
 
         # Build coerced argument list
-        raw_args = [self._vals[a.name] for a in instr.args]
+        raw_args = [self._resolve_val(a) for a in instr.args]
         args: List[ll.Value] = []
         for i, (arg, param_ty) in enumerate(zip(raw_args, param_types)):
             args.append(self._coerce_arg(arg, param_ty))
@@ -656,7 +695,7 @@ class LLVMCodegen:
             if term.value is None:
                 b.ret_void()
             else:
-                val = self._vals[term.value.name]
+                val = self._resolve_val(term.value)
                 # Coerce to declared return type if needed
                 ret_ty = b.block.parent.function_type.return_type
                 b.ret(self._coerce_arg(val, ret_ty))
@@ -665,7 +704,7 @@ class LLVMCodegen:
             b.branch(self._blocks[term.target])
 
         elif isinstance(term, IRCondBr):
-            cond = self._vals[term.cond.name]
+            cond = self._resolve_val(term.cond)
             # Ensure condition is i1
             if cond.type != ll.IntType(1):
                 cond = b.trunc(cond, ll.IntType(1))
@@ -707,7 +746,7 @@ class LLVMCodegen:
                 pm.add_loop_rotate_pass()
                 pm.add_loop_unroll_pass()
                 # GVN removed in new pass manager, instruction combining + CSE covers it mostly
-                pm.add_memcpy_optimize_pass()
+                # pm.add_memcpy_optimize_pass()
                 pm.add_sccp_pass()
             if opt >= 3:
                 pm.add_dead_arg_elimination_pass()
