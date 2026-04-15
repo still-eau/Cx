@@ -1,71 +1,47 @@
 # Generiques
 
-Les generiques permettent d'ecrire une fonction ou une structure qui fonctionne pour n'importe quel type.
+Les generiques permettent d'ecrire du code reutilisable en parametrant les types.
 
----
-
-## Fonction generique
+## Fonctions Generiques
 
 ```cx
-func max<T>(set::T a, set::T b) -> T {
-    if a > b { return a; }
-    return b;
-}
-
-set::int m = max(3, 7);       // T = int, automatically inferred
-set::flt f = max(1.5, 2.5);   // T = flt
-```
-
----
-
-## Structure generique
-
-```cx
-obj Pair<A, B> {
-    set::A first;
-    set::B second;
-}
-
-set::Pair<str, int> score = Pair { first = "Stilau", second = 42 };
-print(score.first);
-```
-
----
-
-## Enum generique
-
-```cx
-enum Option<T> {
-    Some { set::T value; },
-    None,
-}
-
-set::Option<int> x = Option::Some { value = 99 };
-
-match x {
-    Option::Some { value } => { print(value); }
-    Option::None           => { print("none"); }
+func id<T>(set::T valeur) -> T {
+    return valeur;
 }
 ```
 
-`Option<T>` est integre a la bibliotheque standard. C'est la facon idiomatique de representer une valeur optionnelle quand `[opt]` sur un primitif ne suffit pas.
+- Syntaxe : `<T, U, ...>` apres le nom de la fonction.
+- L'inference de type permet souvent d'appeler la fonction sans specifier explicitement le type.
 
----
-
-## Contraintes : `where`
-
-Restreindre les types acceptes pour T.
+## Objets et Enums Generiques
 
 ```cx
-func sum<T>(set::T a, set::T b) -> T where T: Numeric {
-    return a + b;
+obj Boite<T> {
+    set::T contenu;
+}
+
+enum Resultat<T, E> {
+    Succes { set::T valeur; },
+    Erreur { set::E info; }
 }
 ```
 
-| Contrainte  | Signification |
-|-------------|---------------|
-| `Numeric`   | `int`, `uint`, `flt`, `dbl` |
-| `Eq`        | Supporte `==` et `!=` |
-| `Ord`       | Supporte `<`, `>`, `<=`, `>=` |
+## Clauses `where`
 
-> Sans contrainte, le compilateur accepte n'importe quel T mais ne permet que les operations communes a tous les types (affectation, passage en argument).
+Les clauses `where` imposent des contraintes sur les types generiques afin de garantir qu'ils supportent certaines operations.
+
+```cx
+func comparer<T>(set::T a, set::T b) -> bool where T: Ord {
+    return a > b;
+}
+```
+
+### Contraintes Courantes
+
+| Contrainte | Description |
+|------------|-------------|
+| `Numeric`  | Types numeriques (`int`, `flt`, etc.) |
+| `Eq`       | Supporte l'egalite (`==`, `!=`) |
+| `Ord`       | Supporte la comparaison (`<`, `>`, `<=`, `>=`) |
+
+Si aucune contrainte n'est specifiee, seules les operations de base (copie, affectation) sont autorisees sur le type `T`.

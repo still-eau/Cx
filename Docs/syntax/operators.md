@@ -1,131 +1,84 @@
 # Operateurs
 
----
+Cx propose un ensemble complet d'operateurs pour manipuler les donnees.
 
 ## Arithmetique
 
 | Operateur | Description |
 |-----------|-------------|
-| `+`       | Addition |
-| `-`       | Soustraction |
-| `*`       | Multiplication |
-| `/`       | Division |
-| `%`       | Modulo |
-| `**`      | Exponentiation |
+| `+` | Addition |
+| `-` | Soustraction |
+| `*` | Multiplication |
+| `/` | Division |
+| `%` | Modulo |
+| `**` | Exponentiation |
 
 ```cx
-set::int x = 10 + 3;      // 13
-set::int y = 10 % 3;      // 1
-set::flt z = 2.0 ** 8.0;  // 256.0
+set::int x = 10 + 2;
+set::int y = 5 ** 2; // 25
 ```
-
----
-
-## Assignation composee
-
-`+=`  `-=`  `*=`  `/=`  `%=`  `**=`
-
-```cx
-x += 5;
-x **= 2;
-```
-
----
-
-## Increment et decrement
-
-```cx
-x++;    // x = x + 1
-x--;    // x = x - 1
-```
-
-> `++` et `--` sont des **instructions**, pas des expressions. `y = x++` est une erreur.
-
----
 
 ## Comparaison
 
-`==`  `!=`  `<`  `>`  `<=`  `>=`
-
----
+| Operateur | Description |
+|-----------|-------------|
+| `==` | Egal a |
+| `!=` | Different de |
+| `<` | Inferieur a |
+| `>` | Superieur a |
+| `<=` | Inferieur ou egal a |
+| `>=` | Superieur ou egal a |
 
 ## Logique
 
-`&&`  `||`  `!`
+| Operateur | Description |
+|-----------|-------------|
+| `&&` | ET logique (court-circuit) |
+| `||` | OU logique (court-circuit) |
+| `!` | NON logique |
 
-Les deux sont a court-circuit.
-
-```cx
-if alive && health > 0 { attack(); }
-if done || failed      { stop();   }
-```
-
----
-
-## Bit a bit
+## Manipulation de Bits (Bitwise)
 
 | Operateur | Description |
 |-----------|-------------|
-| `&`       | ET bit a bit |
-| `\|`      | OU bit a bit |
-| `^`       | XOR bit a bit |
-| `~`       | NON bit a bit |
-| `<<`      | Decalage gauche |
-| `>>`      | Decalage droit |
-| `>>>`     | Decalage droit logique (non signe) |
+| `&` | ET bit a bit |
+| `|` | OU bit a bit |
+| `^` | XOR bit a bit |
+| `~` | Complement a un |
+| `<<` | Decalage a gauche |
+| `>>` | Decalage a droite |
+| `>>>` | Decalage a droite logique |
+
+## Assignation
+
+Outre l'assignation simple `=`, Cx supporte les assignations composees : `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`.
 
 ```cx
-set::int flags = 0b0000_1010;
-flags |= 0b0001_0000;      // set a bit
-flags &= ~0b0000_1010;     // clear bits
-set::int hi = flags << 4;
-set::int lo = flags >> 4;
+set::int x = 10;
+x += 5; // x est maintenant 15
 ```
 
-Assignation : `&=`  `|=`  `^=`  `<<=`  `>>>=`
+## Increment et Decrement
 
-> `_` dans les literaux numeriques sert de separateur visuel :
-> `1_000_000`, `0xFF_AA_BB_CC`, `0b0000_1010`
+- `x++` : Incremente `x` de 1.
+- `x--` : Decremente `x` de 1.
 
----
+*Note : Ces operateurs sont des instructions et ne peuvent pas etre utilises au sein d'une expression.*
 
-## Coalescence de null : `??`
+## Operateurs Optionnels
 
-Retourne l'operande gauche s'il n'est pas null, sinon l'operande droite.
+- `??` (Coalescence de null) : `a ?? b` retourne `a` si non null, sinon `b`.
+- `?.` (Chaine optionnelle) : `a?.b` retourne `b` si `a` n'est pas null, sinon retourne `null`.
 
-```cx
-set::int[opt] val = null;
-set::int      x   = val ?? 42;    // 42
-```
+## Priorite (de haut en bas)
 
----
-
-## Acces optionnel : `?.`
-
-Court-circuite si l'operande gauche est null, retourne null.
-
-```cx
-set::Player[opt] p = find_player(id);
-set::str[opt]    n = p?.name;    // null if p is null
-```
-
----
-
-## Priorite (haute a basse)
-
-| Niveau | Operateurs |
-|--------|------------|
-| 1      | `()` `[]` `.` `?.` |
-| 2      | `!` `~` `-` (unaire) `*` (deref) `&` (adresse) |
-| 3      | `**` |
-| 4      | `*` `/` `%` |
-| 5      | `+` `-` |
-| 6      | `<<` `>>` `>>>` |
-| 7      | `&` |
-| 8      | `^` |
-| 9      | `\|` |
-| 10     | `==` `!=` `<` `>` `<=` `>=` |
-| 11     | `&&` |
-| 12     | `\|\|` |
-| 13     | `??` |
-| 14     | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>>=` |
+1. `()`, `[]`, `.`, `?.`
+2. `!`, `~`, `-` (unaire), `*` (dereference), `&` (adresse)
+3. `**`
+4. `*`, `/`, `%`
+5. `+`, `-`
+6. `<<`, `>>`, `>>>`
+7. `&`, `^`, `|`
+8. `==`, `!=`, `<`, `>`, `<=`, `>=`
+9. `&&`, `||`, `??`
+10. `=` et ses variantes composees

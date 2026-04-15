@@ -1,83 +1,57 @@
-# Variables
+# Variables et Constantes
 
-Deux qualificateurs. C'est tout.
+En Cx, la declaration de donnees est explicite et claire.
 
-| Qualificateur | Signification |
-|---------------|---------------|
-| `set`         | Variable mutable |
-| `const`       | Constante, jamais modifiable |
+## Declaration
+
+On utilise deux mots-cles pour definir la mutabilite :
+
+- `set` : Definit une variable dont la valeur peut changer.
+- `const` : Definit une constante dont la valeur est fixee a l'initialisation.
+
+La syntaxe utilise le separateur `::` entre le qualificateur et le type.
 
 ```cx
-set::int   x = 42;
-const::str NAME = "Cx";
+set::int   score = 0;
+const::str VERSION = "1.0.0";
 ```
 
----
+## Primitive Types
 
-## Types primitifs
+Les types de base supportes par le compilateur :
 
 | Type   | Description |
 |--------|-------------|
-| `int`  | Entier signe (taille native : 32 ou 64 bits selon la plateforme) |
-| `uint` | Entier non signe |
-| `flt`  | Virgule flottante simple precision |
-| `dbl`  | Virgule flottante double precision |
-| `char` | Caractere UTF-8 |
-| `str`  | Chaine de caracteres (pointeur + longueur) |
-| `bool` | `true` ou `false` |
-| `null` | Absence de valeur |
-| `void` | Aucune valeur (type de retour uniquement) |
+| `int`  | Entier signe (taille native) |
+| `uint` | Entier non signe (taille native) |
+| `flt`  | Flottant 32-bits (float) |
+| `dbl`  | Flottant 64-bits (double) |
+| `char` | Caractere (UTF-8) |
+| `str`  | Chaine de caracteres |
+| `bool` | Valeur booleenne (`true`, `false`) |
+| `void` | Type vide (uniquement pour les retours de fonction) |
 
----
+## Inference de Type
 
-## Modificateurs de type
-
-S'ajoutent apres le type entre crochets.
-
-| Modificateur | Description |
-|--------------|-------------|
-| `[long]`     | Version etendue : `int[long]` fait toujours 64 bits |
-| `[short]`    | Version reduite : `int[short]` fait toujours 16 bits |
-| `[ptr]`      | Pointeur brut vers une valeur |
-| `[opt]`      | Peut etre `null` |
+Le caractere `_` (wildcard) permet au compilateur de deduire le type a partir de la valeur d'initialisation.
 
 ```cx
-set::int[long]    large   = 20_000_000_000;
-set::int[short]   small   = 12;
-set::int[ptr]     p       = &x;
-set::int[opt]     maybe   = null;
-set::int[ptr][opt] nullable = null;    // pointeur qui peut etre null
+set::_ x = 42;          // int
+const::_ name = "Cx";   // str
 ```
 
----
+## Initialisation par defaut
 
-## Inference de type
-
-`_` laisse le compilateur deduire le type.
+Si aucune valeur n'est fournie, la variable est initialisee a sa valeur "zero" (0, 0.0, false, null).
 
 ```cx
-set::_ result = compute();
-const::_ MAX  = 255;
+set::int counter;   // Initiale a 0
 ```
 
----
+## Declarations Multiples
 
-## Zero-initialisation
-
-Sans valeur, toute variable est zero-initialisee.
+Il est possible de declarer plusieurs variables sur une seule ligne.
 
 ```cx
-set::int   count;    // 0
-set::flt   ratio;    // 0.0
-set::bool  flag;     // false
-set::int[ptr] ptr;   // null pointer
-```
-
----
-
-## Plusieurs declarations
-
-```cx
-set::int a = 1, b = 2, c = 3;
-set::int x, y, z = 0;    // tous a zero
+set::int x = 1, y = 2, z;
 ```

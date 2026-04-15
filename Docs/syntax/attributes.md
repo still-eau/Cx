@@ -1,83 +1,52 @@
-# Attributs
+# Directives et Attributs
 
-Les attributs modifient le comportement d'une declaration a la compilation.
-Il y en a quatre.
+Les directives commencent par `@` et fournissent des instructions speciales au compilateur.
 
----
+## Attributs de Fonction
 
-## `@inline`
+Ces attributs modifient la generation de code ou l'analyse statique d'une fonction.
 
-Incite le compilateur a inserer le code de la fonction directement a l'endroit de l'appel.
-
-```cx
-@inline
-func abs(set::int x) -> int {
-    return if x < 0 { -x } else { x };
-}
-```
-
----
-
-## `@noreturn`
-
-La fonction ne rend jamais la main. Le compilateur peut supprimer le code mort apres son appel.
-
-```cx
-@noreturn
-func panic(set::str msg) -> void {
-    print(msg);
-    exit(1);
-}
-
-func divide(set::int a, set::int b) -> int {
-    if b == 0 { panic("division by zero"); }
-    return a / b;
-    // le compilateur sait que panic() ne retourne pas,
-    // il ne se plaint pas d'un chemin sans return
-}
-```
-
----
-
-## `@extern`
-
-Lie la declaration a un symbole externe (code C, assembly, OS).
+| Attribut | Description |
+|----------|-------------|
+| `@inline` | Suggere au compilateur d'integrer le code de la fonction directement. |
+| `@noreturn` | Indique que la fonction ne rend jamais le contrôle (ex: panic, exit). |
+| `@extern("nom")` | Lie la fonction a un symbole externe (souvent en C). Pas de corps autorise. |
+| `@unsafe` | Autorise les operations non securisees dans tout le corps de la fonction. |
 
 ```cx
 @extern("puts")
-func c_puts(set::int[ptr] s) -> int;
+func c_puts(set::str s) -> int;
 
-@extern("malloc")
-func c_malloc(set::uint size) -> int[ptr];
-```
-
-La fonction ne doit pas avoir de corps : c'est une declaration uniquement.
-
----
-
-## `@unsafe`
-
-Autorise les operations dangereuses dans le corps de la fonction.
-Equivalent a envelopper tout le corps dans un bloc `@unsafe { ... }`.
-
-```cx
-@unsafe
-func raw_copy(set::int[ptr] dst, set::int[ptr] src, set::uint n) -> void {
-    for i in 0..<n {
-        dst[i] = src[i];
-    }
+@inline
+func multiplier(set::int x) -> int {
+    return x * 2;
 }
 ```
 
-Un bloc `@unsafe` peut aussi s'utiliser localement dans une fonction normale :
+## Directives Speciales
+
+### `@unsafe { ... }`
+
+Le mot-cle `@unsafe` peut egalement etre utilise pour marquer un bloc de code specifique au sein d'une fonction comme non securise.
 
 ```cx
-func example() -> void {
-    set::int x = 42;
-
+func bidouille() -> void {
     @unsafe {
-        set::int[ptr] p = &x;
-        p = p + 1;     // pointer arithmetic, forbidden without @unsafe
+        // Arithmetique de pointeurs autorisee ici
     }
 }
 ```
+
+### `@when(condition) { ... }`
+
+Permet de realiser une compilation conditionnelle selon la cible ou l'environnement.
+
+```cx
+@when(target == "linux") {
+    // Code specifique Linux
+}
+```
+
+### `@import`
+
+Utilise pour importer des modules (voir [Modules](./modules.md)).

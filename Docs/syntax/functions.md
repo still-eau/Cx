@@ -1,137 +1,72 @@
-# Fonctions
+# Fonctions et Lambdas
 
-Une seule facon de declarer une fonction.
+Les fonctions sont les unites de base de la logique en Cx. Elles sont flexibles, supportent les parametres par defaut et peuvent echouer de maniere explicite.
+
+## Declaration
 
 ```cx
-func <name>(<params>) -> <return_type> {
-    <body>
+func nom(qual::Type param = defaut) -> ReturnType {
+    // corps
 }
 ```
 
 ```cx
-func add(set::int a, set::int b) -> int {
+func addition(set::int a, set::int b) -> int {
     return a + b;
 }
+```
 
-func log(set::str message) -> void {
+## Valeurs de Retour
+
+- `-> void` : La fonction ne retourne rien (optionnel).
+- `-> (T1, T2)` : Retourne un tuple de valeurs.
+- `-> T | fail E` : La fonction peut soit retourner un succes (`T`), soit echouer avec une erreur (`E`).
+
+```cx
+func diviser(set::int a, set::int b) -> (int, int) {
+    return (a / b, a % b);
+}
+```
+
+## Parametres par Defaut
+
+Les fonctions peuvent avoir des valeurs de parametre par defaut, ce qui les rend optionnelles lors de l'appel.
+
+```cx
+func saluer(set::str message = "Bonjour") -> void {
     print(message);
 }
 ```
 
-`-> void` peut etre omis si la fonction ne retourne rien.
+## Fonctions de Premiere Classe
 
----
-
-## Parametres par defaut
+Les fonctions peuvent etre stockees dans des variables et passees comme arguments.
 
 ```cx
-func connect(set::str host, set::uint port = 8080) -> bool {
-    ...
-}
-
-connect("localhost");          // port = 8080
-connect("localhost", 3000);    // port = 3000
+set::func(int, int) -> int operation = addition;
 ```
 
----
+## Lambdas
 
-## Retours multiples
+Syntaxe legere pour les fonctions anonymes : `|params| expression`.
 
 ```cx
-func divide(set::int a, set::int b) -> (int, int) {
-    return (a / b, a % b);
-}
-
-set::int quotient, remainder = divide(10, 3);
+set::func(int) -> int multiplier = |x| x * 2;
 ```
 
----
+## Gestion des Erreurs
 
-## Fonctions de premiere classe
+Cx utilise un systeme explicite pour les fonctions pouvant echouer.
 
-Les fonctions sont des valeurs. On les stocke et on les passe.
-
-```cx
-set::func(int, int) -> int  op = add;
-set::int result = op(3, 4);
-
-func apply(set::func(int) -> int f, set::int x) -> int {
-    return f(x);
-}
-```
-
-Forme courte pour une fonction anonyme a une expression :
+- `fail valeur` : Interrompt la fonction et retourne une erreur.
+- `try appel()` : Propage l'erreur a l'appelant.
+- `appel() catch err { ... }` : Gere l'erreur localement.
 
 ```cx
-set::func(int) -> int double = |x| x * 2;
-set::func(int) -> int triple = |x| x * 3;
-```
-
----
-
-## Erreurs : `fail`, `try`, `catch`
-
-Une fonction qui peut echouer le declare dans son type de retour.
-
-```cx
-func read_file(set::str path) -> str | fail str {
-    if !file_exists(path) {
-        fail "file not found";
+func lire_fichier(set::str path) -> str | fail str {
+    if !existe(path) {
+        fail "Fichier introuvable";
     }
-    return file_content(path);
-}
-```
-
-Propager l'erreur vers l'appelant avec `try` :
-
-```cx
-func process() -> void | fail str {
-    set::str content = try read_file("config.txt");
-    print(content);
-}
-```
-
-Gerer localement avec `catch` :
-
-```cx
-// Avec recuperation de l'erreur
-set::str content = read_file("config.txt") catch err {
-    print("error: " + err);
-    ""
-};
-
-// Sans recuperer l'erreur
-set::str content = read_file("config.txt") catch { "" };
-```
-
-> Il n'y a pas d'exceptions. Les erreurs sont des valeurs dans le type de retour.
-> Ignorer une erreur sans `catch` est une erreur de compilation.
-
----
-
-## Attributs de fonction
-
-| Attribut         | Effet |
-|------------------|-------|
-| `@inline`        | Incitation a inliner l'appel |
-| `@noreturn`      | La fonction ne retourne jamais |
-| `@extern("sym")` | Lien vers un symbole C externe |
-| `@unsafe`        | Corps autorise les operations dangereuses |
-
-```cx
-@inline
-func clamp(set::int val, set::int lo, set::int hi) -> int {
-    if val < lo { return lo; }
-    if val > hi { return hi; }
-    return val;
-}
-
-@extern("puts")
-func c_puts(set::int[ptr] s) -> int;
-
-@noreturn
-func panic(set::str msg) -> void {
-    print(msg);
-    exit(1);
+    return contenu(path);
 }
 ```

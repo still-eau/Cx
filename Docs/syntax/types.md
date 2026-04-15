@@ -1,106 +1,72 @@
-# Types
+# Types de Donnees
 
-Cx a trois constructions de types composites : `obj`, `arr`, `enum`.
-Tout le reste (vec, map, queue...) vient de la bibliotheque standard.
+Cx propose des types primitifs simples et des constructions composites puissantes pour organiser vos donnees.
 
----
+## Modificateurs de Type
 
-## Tableaux fixes : `arr`
+Les types de base peuvent etre modifies pour preciser leur taille ou leur comportement. Les modificateurs se placent entre crochets `[]` apres le type.
 
-Bloc memoire contigu de taille fixe, connue a la compilation.
+| Modificateur | Description |
+|--------------|-------------|
+| `[long]`     | Etend la taille (ex: `int[long]` est un entier 64-bits) |
+| `[short]`    | Reduit la taille (ex: `int[short]` est un entier 16-bits) |
+| `[ptr]`      | Definit un pointeur vers le type |
+| `[opt]`      | Indique que la valeur peut etre `null` |
 
 ```cx
-arr::<type>|<capacity>| <name> = (<val1>, <val2>, ...);
+set::int[long] large_value = 1234567890;
+set::int[ptr]  p_val = null;
 ```
 
-```cx
-arr::str|3| fruits = ("apple", "banana", "cherry");
-arr::int|8| scores;                      // zero-initialized
+## Objets : `obj`
 
-set::str first  = fruits[0];
-fruits[1] = "mango";
-set::uint length = fruits.len;           // 3, compile-time constant
-```
-
-> Acces hors limites avec indice constant : erreur de compilation.
-> Acces hors limites avec indice dynamique : panic a l'execution.
-
----
-
-## Structures : `obj`
-
-Regroupe des donnees et des fonctions qui les manipulent.
+Les objets regroupent des donnees (champs) et des comportements (methodes).
 
 ```cx
-obj Player {
-    set::str  name;
-    set::int  health  = 100;
-    set::flt  speed   = 1.0;
+obj Entity {
+    set::str name;
+    set::int health = 100;
 
-    func greet() -> str {
-        return "I am " + self.name;
-    }
-
-    func take_damage(set::int amount) -> void {
-        self.health -= amount;
+    func is_alive() -> bool {
+        return self.health > 0;
     }
 }
 ```
 
-Instanciation :
+- `self` : Refere a l'instance actuelle a l'interieur d'une methode.
+- L'initialisation se fait via une syntaxe de bloc : `Entity { name = "Hero" }`.
+
+## Tableaux : `arr`
+
+Les tableaux ont une taille fixe connue a la compilation.
 
 ```cx
-set::Player hero = Player {
-    name   = "Stilau",
-    health = 100,
-    speed  = 1.5,
-};
-
-hero.take_damage(30);
-set::str msg = hero.greet();
+arr::int|4| scores = (10, 20, 30, 40);
 ```
 
-> `self` designe l'instance courante dans une methode. Il ne se declare pas dans les parametres.
-
----
+- Syntaxe : `arr::Type|Capacite|`.
+- Initialisation : `(val1, val2, ...)`.
+- Acces : `scores[0]`, `scores.len`.
 
 ## Enumerations : `enum`
 
-Ensemble ferme de variantes. Chaque variante peut porter des donnees.
+Les enums permettent de definir une somme de types. Chaque variante peut optionnellement contenir des champs.
 
 ```cx
-enum Result {
-    Ok    { set::str value; },
-    Fail  { set::str reason; },
-}
-
-enum Direction { North, South, East, West }
-```
-
-Utilisation :
-
-```cx
-set::Result r = Result::Ok { value = "done" };
-
-match r {
-    Result::Ok   { value }  => { print(value);  }
-    Result::Fail { reason } => { print(reason); }
+enum Status {
+    Active,
+    Inactive,
+    Error { set::str code; }
 }
 ```
 
-L'enum est le seul mecanisme de polymorphisme en Cx.
-Pas d'heritage, pas d'interfaces : juste des variantes de donnees.
+- Les enums sont parfaits pour le pattern matching (voir [Flux de Controle](./control_flow.md)).
 
----
+## Alias : `alias`
 
-## Alias de type
-
-Renomme un type existant. Utile pour la clarte.
+Permet de creer un nouveau nom pour un type existant.
 
 ```cx
-alias Id     = uint;
-alias Size   = int[long];
-
-set::Id   entity_id = 42;
-set::Size file_size = 1_048_576;
+alias UserId = uint;
+set::UserId id = 101;
 ```

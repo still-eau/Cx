@@ -1,129 +1,86 @@
-# Flux de controle
+# Flux de Controle
 
-Trois constructions. C'est tout.
-
----
+Cx propose des structures de controle epurees et puissantes.
 
 ## `if` / `else`
 
-Pas de parentheses. Accolades obligatoires.
+Les parentheses sont optionnelles, mais les accolades sont obligatoires.
 
 ```cx
-if x > 0 {
-    print("positive");
-} else if x < 0 {
-    print("negative");
+if score >= 90 {
+    print("A");
+} else if score >= 80 {
+    print("B");
 } else {
-    print("zero");
+    print("F");
 }
 ```
 
-`if` peut etre une expression. Les deux branches doivent avoir le meme type.
+`if` peut egalement etre utilise comme une expression :
 
 ```cx
-set::str label = if score > 50 { "pass" } else { "fail" };
+set::str resultat = if x > 0 { "positif" } else { "negatif" };
 ```
 
----
+## `for` : La Boucle Unique
 
-## `for` : la seule boucle
+La boucle `for` est polyvalente et remplace toutes les autres formes de boucles.
 
-`for` couvre tous les cas de boucle.
-
-### Plage numerique
-
+### Iteration sur une plage (Range)
 ```cx
-for i in 0..9   { print(i); }    // [0, 9] inclus
-for i in 0..<10 { print(i); }    // [0, 10[ exclusif
+for i in 0..10 { ... }     // 0 a 10 inclus
+for i in 0..<10 { ... }    // 0 a 9 (10 exclu)
 ```
 
-### Iteration sur un tableau
-
+### Iteration sur une collection
 ```cx
-for item in inventory { print(item); }
+for element in liste { ... }
+for index, element in liste { ... }
+```
 
-for i, item in inventory { print(i, "->", item); }    // avec indice
+### Boucle conditionnelle (While)
+```cx
+for x < 100 {
+    x += 1;
+}
 ```
 
 ### Boucle infinie
-
 ```cx
 for {
-    set::int key = read_key();
-    if key == KEY_QUIT { break; }
-    handle(key);
+    if fini() { break; }
 }
 ```
 
-### Boucle conditionnelle
+## `match` : Pattern Matching
 
-```cx
-for health > 0 {
-    health -= take_hit();
-}
-```
-
-### `break` et `continue`
-
-```cx
-for i in 0..<100 {
-    if i == 50    { break;    }
-    if i % 2 == 0 { continue; }
-    print(i);
-}
-```
-
-Etiquettes pour les boucles imbriquees :
-
-```cx
-outer: for i in 0..<10 {
-    for j in 0..<10 {
-        if i + j == 15 { break outer; }
-    }
-}
-```
-
----
-
-## `match`
-
-Correspondance de motif. L'exhaustivite est verifiee a la compilation.
+`match` permet de comparer une valeur a une serie de motifs. Il doit etre exhaustif.
 
 ```cx
 match direction {
-    Direction::North => { move(0,  1); }
-    Direction::South => { move(0, -1); }
-    Direction::East  => { move( 1, 0); }
-    Direction::West  => { move(-1, 0); }
+    North => print("Haut"),
+    South => print("Bas"),
+    _     => print("Autre"), // Joker
 }
 ```
 
-Avec capture des donnees d'un enum :
+`match` supporte egalement l'extraction de donnees des enums :
 
 ```cx
-match result {
-    Result::Ok   { value }  => { use(value);   }
-    Result::Fail { reason } => { print(reason); }
+match status {
+    Active          => print("Ok"),
+    Error { code }  => print("Erreur: " + code),
 }
 ```
 
-Joker et gardes :
+## Labels et Sauts
+
+On peut nommer une boucle avec un label pour l'interrompre specifiquement depuis une boucle imbriquee.
 
 ```cx
-match code {
-    0             => { print("ok");       }
-    1 | 2         => { print("warning");  }
-    n if n >= 100 => { print("critical"); }
-    _             => { print("unknown");  }
+externe: for i in 0..10 {
+    for j in 0..10 {
+        if i * j > 50 { break externe; }
+    }
 }
-```
-
-`match` comme expression :
-
-```cx
-set::str label = match code {
-    0 => "ok",
-    1 => "warning",
-    _ => "unknown",
-};
 ```

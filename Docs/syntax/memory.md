@@ -1,114 +1,66 @@
-# Memoire et pointeurs
+# Gestion Memoire
 
-Par defaut Cx est sur. Les pointeurs bruts et l'arithmetique memoire requierent `@unsafe`.
+Cx offre un contrôle total sur la mémoire, alliant sécurité par défaut et puissance pour les besoins système.
 
----
+## Pointers
 
-## Pointeurs
-
-Le modificateur `[ptr]` transforme un type en pointeur brut.
+Le modificateur `[ptr]` indique une adresse memoire vers une valeur.
 
 ```cx
-set::int       x = 42;
-set::int[ptr]  p = &x;      // address of x
-set::int       v = *p;      // read through pointer
-*p = 99;                    // write through pointer
+set::int x = 10;
+set::int[ptr] p = &x;     // Adresse de x
+set::int v = *p;          // De-referencement (lecture)
+*p = 20;                  // De-referencement (ecriture)
 ```
 
-Un `[ptr]` peut etre null. Pour le rendre explicite, combiner avec `[opt]` :
+## Allocation Dynamique (Tas)
+
+Cx delegue la gestion du tas a des fonctions intrinseques explicites.
 
 ```cx
-set::int[ptr][opt] p = null;
-
-if p != null {
-    print(*p);
-}
+set::int[ptr] tab = alloc(int, 10);  // Alloue 10 entiers
+tab[0] = 42;
+free(tab);                            // Libere la memoire
 ```
 
----
+- Chaque `alloc` doit imperativement etre libere par un `free`.
+- `sizeof(Type)` et `alignof(Type)` retournent la taille et l'alignement en octets.
 
-## Allocation sur le tas
+## Zones @unsafe
 
-```cx
-set::int[ptr] buffer = alloc(int, 64);    // 64 ints, zero-initialized
-buffer[0] = 1;
-buffer[1] = 2;
-free(buffer);                             // must be called exactly once
-```
-
-> Chaque `alloc` doit avoir exactement un `free`. Un double-free est un comportement indefini.
-
----
-
-## Zone @unsafe
-
-L'arithmetique de pointeur est interdite en dehors d'un bloc `@unsafe`.
+Les operations dangereuses (arithmetique de pointeurs, casts bruts) ne sont autorisees que dans un bloc ou une fonction marquee `@unsafe`.
 
 ```cx
 @unsafe {
-    set::int[ptr] p = alloc(int, 16);
-    set::int[ptr] q = p + 4;     // advance by 4 elements
-    *q = 0xAB;
+    set::int[ptr] p = alloc(int, 5);
+    set::int[ptr] q = p + 2;   // Arithmetique de pointeurs possible ici
+    *q = 100;
     free(p);
 }
 ```
 
-`@unsafe` debloque aussi `cast` sur des pointeurs et `transmute`.
+## Casts et Transmutes
 
----
-
-## `cast` : conversion de type
+- `cast(Type, Valeur)` : Conversion explicite de type (souvent pour les nombres).
+- `transmute(Type, Valeur)` : Reinterpretation brute des bits d'un type vers un autre. Requis dans des blocs `@unsafe`.
 
 ```cx
-set::int  n = 300;
-set::uint u = cast(uint, n);    // numeric cast
+set::flt f = 3.14;
+set::uint i = cast(uint, f);
 
-// Pointer reinterpretation (requires @unsafe)
 @unsafe {
-    set::int[ptr] raw = alloc(int, 4);
-    set::flt[ptr] fp  = cast(flt[ptr], raw);    // same bits, different type
-    free(raw);
+    set::uint bits = transmute(uint, f); // Meme bits, type different
 }
 ```
 
-> Les conversions numeriques tronquent silencieusement, elles ne paniquent pas.
+## Fonctions Intrinseques Memoire
 
----
-
-## `transmute` : reinterpretation de bits
-
-Memes bits, type different, taille identique. Toujours dans `@unsafe`.
-
-```cx
-@unsafe {
-    set::uint bits = 0x3F800000;
-    set::flt  one  = transmute(flt, bits);    // == 1.0
-}
-```
-
----
-
-## Intrinsiques memoire
-
-| Fonction                  | Description |
-|---------------------------|-------------|
-| `alloc(T, n) -> T[ptr]`   | Alloue n elements de type T sur le tas |
-| `free(ptr)`               | Libere une allocation |
-| `sizeof(T) -> uint`       | Taille du type T en octets |
-| `alignof(T) -> uint`      | Alignement du type T en octets |
-| `memcpy(dst, src, n)`     | Copie n octets de src vers dst |
-| `memset(dst, val, n)`     | Remplit n octets avec val |
-| `cast(T, val)`            | Convertit val en type T |
-| `transmute(T, val)`       | Reinterprete les bits de val en T |
-
----
-
-## Lien avec du code C
-
-```cx
-@extern("malloc")
-func c_malloc(set::uint size) -> int[ptr];
-
-@extern("free")
-func c_free(set::int[ptr] p) -> void;
-```
+| Nom | Utilite |
+|-----|---------|
+| `alloc(T, n)` | Alloue `n` elements de type `T` |
+| `free(p)` | Libere le pointeur `p` |
+| `sizeof(T)` | Taille de `T` en octets |
+| `memcpy(d, s, n)` | Copie memoire |
+| `memset(d, v, n)` | Remplit la memoire |
+| `cast(T, v)` | Conversion de type |
+| `transmute(T, v)` | Reinterpretation de bits |
