@@ -61,7 +61,11 @@ class TypeChecker:
                           [ParamDecl(loc, "set", ModifiedType(loc, PrimType(loc, "void"), ["ptr"]), "p")],
                           None, None, None)
                           
-        return {"print": print_fn, "allocate": alloc_fn, "deallocate": free_fn}
+        # read_int() -> int
+        read_int_fn = FuncDecl(loc, True, "read_int", [], [], 
+                              PrimType(loc, "int"), None, None)
+                              
+        return {"print": print_fn, "allocate": alloc_fn, "deallocate": free_fn, "read_int": read_int_fn}
 
     # ================================================================
     # Public entry point
