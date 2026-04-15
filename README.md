@@ -78,7 +78,6 @@ cx --help
 
 Exemple d'un programme simple minimal (`01_hello.cx`) :
 ```rust
-@import:std/io/print();
 
 func main() -> int {
     print("Hello, System!\n");
