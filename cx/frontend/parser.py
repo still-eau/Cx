@@ -1138,7 +1138,7 @@ class Parser:
             val = self._parse_expr(); self._expect(TK.COMMA)
             n   = self._parse_expr()
             self._expect(TK.RPAREN)
-            return MemsetExpr(loc, dst, src, n)
+            return MemsetExpr(loc, dst, val, n)
 
         # prefix unary: - ! ~ * &
         if self._check(*_UNARY_OPS):

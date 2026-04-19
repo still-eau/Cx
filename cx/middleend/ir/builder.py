@@ -550,7 +550,7 @@ class IRBuilder:
             if isinstance(recv_ty, PtrCxType):
                 recv_ty = recv_ty.pointee
                 
-            if isinstance(recv_ty, (ObjCxType, NamedType)):
+            if isinstance(recv_ty, ObjCxType):
                 callee = f"{recv_ty.name}_{expr.method}"
             else:
                 callee = expr.method # Fallback
@@ -708,7 +708,7 @@ class IRBuilder:
         if isinstance(expr, FreeExpr):
             ptr = self._build_expr(expr.ptr)
             self._block.emit(IRCall(dest=None, callee="__cx_free", args=[ptr], ret_ty=VOID))
-            return VOID
+            return UNDEF
 
         return UNDEF
 

@@ -123,12 +123,12 @@ class ErrorReporter:
         loc:  Optional[Loc] = None,
         hint: Optional[str] = None,
     ) -> None:
-        d = Diagnostic("warning", msg, loc, self._source, hint)
+        d = Diagnostic("warning", msg, loc, self._sources, hint)
         self._warnings.append(d)
         d.render()
 
     def note(self, msg: str, loc: Optional[Loc] = None) -> None:
-        Diagnostic("note", msg, loc, self._source).render()
+        Diagnostic("note", msg, loc, self._sources).render()
 
     def hint(self, msg: str) -> None:
         Diagnostic("hint", msg).render()
